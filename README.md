@@ -50,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }        # full history for base...head diff
-      - uses: lohi-ai/swatter@v1
+      - uses: lohi-ai/swatter@v0
         with:
           api_key: ${{ secrets.SWATTER_API_KEY }}
           model: claude-opus-4-8
