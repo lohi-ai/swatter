@@ -64,6 +64,10 @@ func RenderMarkdown(res Result, cfg Config, packet *Packet) string {
 		b.WriteString(sr)
 		b.WriteString("\n")
 	}
+	if br := renderBriefing(res); br != "" {
+		b.WriteString(br)
+		b.WriteString("\n")
+	}
 
 	fmt.Fprintf(&b, "<sub>ANGLES: %s | validated=%d rejected=%d consensus=%d sweep=%s · $%.2f / %d tok</sub>\n",
 		angleLine(res.AngleCounts), res.Validated, res.Rejected, res.Consensus,
@@ -105,11 +109,54 @@ func RenderSummaryComment(res Result, packet *Packet) string {
 		b.WriteString(sr)
 		b.WriteString("\n")
 	}
+	if br := renderBriefing(res); br != "" {
+		b.WriteString(br)
+		b.WriteString("\n")
+	}
 
 	fmt.Fprintf(&b, "<sub>ANGLES: %s | validated=%d rejected=%d consensus=%d sweep=%s · $%.2f / %d tok</sub>\n",
 		angleLine(res.AngleCounts), res.Validated, res.Rejected, res.Consensus,
 		sweepStr(res.SweepRan), res.SpentUSD, res.SpentTokens)
 	return b.String()
+}
+
+// renderBriefing renders the LLM reviewer briefing: a one-line "what this PR
+// does" summary always visible, with the walkthrough and quiz folded into a
+// <details> block so the comment stays scannable. Answers are nested in their
+// own <details> so a reviewer tries each question before peeking. Returns ""
+// when there is no briefing (disabled, budget-exhausted, or nothing usable).
+func renderBriefing(res Result) string {
+	b := res.Briefing
+	if b == nil {
+		return ""
+	}
+	var sb strings.Builder
+	if b.Summary != "" {
+		fmt.Fprintf(&sb, "**What this PR does** · %s\n", b.Summary)
+	}
+	if len(b.Walkthrough) == 0 && len(b.Quiz) == 0 {
+		return sb.String()
+	}
+
+	sb.WriteString("\n<details><summary>🔍 Reviewer briefing — walkthrough & quiz</summary>\n\n")
+	if len(b.Walkthrough) > 0 {
+		sb.WriteString("**Walkthrough**\n\n")
+		for _, w := range b.Walkthrough {
+			fmt.Fprintf(&sb, "- %s\n", w)
+		}
+		sb.WriteString("\n")
+	}
+	if len(b.Quiz) > 0 {
+		sb.WriteString("**Check you caught it** — answer before peeking:\n\n")
+		for i, q := range b.Quiz {
+			fmt.Fprintf(&sb, "**Q%d.** %s\n", i+1, q.Q)
+			if q.A != "" {
+				fmt.Fprintf(&sb, "<details><summary>show answer</summary>\n\n%s\n</details>\n\n", q.A)
+			}
+		}
+	}
+	sb.WriteString("</details>\n")
+	return sb.String()
 }
 
 // renderScopeRisk frames a review with two deterministic lines — what the PR

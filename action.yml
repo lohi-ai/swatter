@@ -31,6 +31,10 @@ inputs:
     description: 'Check-run red threshold: never (default, advisory — green check + comments) | critical | major | any.'
     required: false
     default: never
+  briefing:
+    description: 'LLM reviewer briefing (summary + walkthrough + quiz) on the review comment. true (default) | false to skip the extra model call.'
+    required: false
+    default: 'true'
   max_usd:
     description: Per-PR spend ceiling (uses agentcore pricing for known models).
     required: false
@@ -89,6 +93,7 @@ runs:
     SWATTER_MODEL: ${{ inputs.model }}
     SWATTER_MODEL_CHEAP: ${{ inputs.model_cheap }}
     SWATTER_FAIL_ON: ${{ inputs.fail_on }}
+    SWATTER_BRIEFING: ${{ inputs.briefing }}
     SWATTER_MAX_USD: ${{ inputs.max_usd }}
     SWATTER_MAX_TOKENS_TOTAL: ${{ inputs.max_tokens_total }}
     SWATTER_PRICE_PER_MTOK_IN: ${{ inputs.price_per_mtok_in }}

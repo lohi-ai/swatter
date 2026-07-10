@@ -51,6 +51,11 @@ type Config struct {
 
 	FailOn FailOn
 
+	// Briefing turns on the LLM reviewer briefing (summary + walkthrough + quiz)
+	// appended to the review comment. On by default; SWATTER_BRIEFING=0 disables
+	// it to save the one extra model call per review.
+	Briefing bool
+
 	// RepoRoot is the checkout the read-only toolset is rooted at.
 	RepoRoot string
 
@@ -83,6 +88,7 @@ func LoadConfig() (Config, error) {
 		PricePerMTokIn: envFloat("SWATTER_PRICE_PER_MTOK_IN", 0),
 		PricePerMTokOut: envFloat("SWATTER_PRICE_PER_MTOK_OUT", 0),
 		FailOn:         FailOn(envDefault("SWATTER_FAIL_ON", string(FailOnNever))),
+		Briefing:       envBool("SWATTER_BRIEFING", true),
 		RepoRoot:       envDefault("SWATTER_REPO_ROOT", "."),
 		PromoteAfter:   envInt("SWATTER_RULE_PROMOTE_AFTER", 3),
 		RulesCommit:    envBool("SWATTER_RULES_COMMIT", true),

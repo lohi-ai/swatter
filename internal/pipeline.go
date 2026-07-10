@@ -28,6 +28,9 @@ type Result struct {
 	// RejectedRuleIDs are rule ids cited by candidates the validator rejected —
 	// misses that decay the rule's confidence in the lifecycle pass.
 	RejectedRuleIDs []string
+	// Briefing is the optional LLM reviewer briefing (summary + walkthrough +
+	// quiz). nil when disabled, budget-exhausted, or the pass produced nothing.
+	Briefing *Briefing
 }
 
 // FiredRuleIDs are the rule ids cited by surviving findings — hits that raise a
@@ -106,6 +109,17 @@ func (p *Pipeline) Run(ctx context.Context) (Result, error) {
 
 	SortFindings(findings)
 	res.Findings = findings
+
+	// Reviewer briefing — an LLM summary + walkthrough + quiz layered on top of
+	// the deterministic scope/risk lines. Best-effort and budget-gated: a failure
+	// or an exhausted budget just omits it, so the review never depends on it.
+	if p.cfg.Briefing && !p.deps.budget.Exhausted() {
+		p.progress("briefing: summarizing the change for the reviewer")
+		if b, err := p.deps.BriefReview(ctx, p.packet, findings); err == nil {
+			res.Briefing = b
+		}
+	}
+
 	res.SpentUSD, res.SpentTokens = p.deps.budget.Spent()
 	return res, nil
 }
