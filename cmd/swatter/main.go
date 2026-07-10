@@ -129,7 +129,7 @@ func cmdRun(args []string) int {
 	case "json":
 		fmt.Println(internal.RenderJSON(res))
 	default:
-		fmt.Print(internal.RenderMarkdown(res, cfg))
+		fmt.Print(internal.RenderMarkdown(res, cfg, packet))
 	}
 
 	if reporter != nil {

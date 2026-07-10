@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -128,6 +129,91 @@ func (p *Packet) buildBrief() string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// DiffStat splits the unified diff into added and removed content-line counts,
+// excluding the +++/--- file headers. Feeds the review summary's scope line.
+func (p *Packet) DiffStat() (added, removed int) {
+	for _, l := range strings.Split(p.Diff, "\n") {
+		switch {
+		case strings.HasPrefix(l, "+++"), strings.HasPrefix(l, "---"):
+			continue
+		case strings.HasPrefix(l, "+"):
+			added++
+		case strings.HasPrefix(l, "-"):
+			removed++
+		}
+	}
+	return added, removed
+}
+
+// priorityAreas groups the changed files into named sensitive buckets so the
+// scope line can say what a PR touches (e.g. "auth, migration"), not just that
+// it hit "something priority". Returns the distinct bucket names, sorted.
+func priorityAreas(files []string) []string {
+	buckets := []struct {
+		name string
+		kws  []string
+	}{
+		{"money", []string{"payment", "billing", "money", "wallet"}},
+		{"auth", []string{"auth", "credential", "secret", "session", "token"}},
+		{"migration", []string{"migration", "migrate"}},
+		{"webhook", []string{"webhook"}},
+	}
+	var out []string
+	for _, bkt := range buckets {
+		for _, f := range files {
+			l := strings.ToLower(f)
+			hit := false
+			for _, kw := range bkt.kws {
+				if strings.Contains(l, kw) {
+					hit = true
+					break
+				}
+			}
+			if hit {
+				out = append(out, bkt.name)
+				break
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// countTests counts the changed files that are tests.
+func countTests(files []string) int {
+	n := 0
+	for _, f := range files {
+		if isTest(f) {
+			n++
+		}
+	}
+	return n
+}
+
+// hasProductionCode reports whether any changed file is real source — not a
+// test, lockfile, generated file, or prose doc. Used to decide whether "no
+// tests" is worth flagging on the scope line (a docs-only PR shouldn't be
+// nagged).
+func hasProductionCode(files []string) bool {
+	for _, f := range files {
+		if !isTest(f) && !isGeneratedOrLock(f) && !isDoc(f) {
+			return true
+		}
+	}
+	return false
+}
+
+// isDoc reports whether a file is prose/documentation rather than source.
+func isDoc(f string) bool {
+	l := strings.ToLower(f)
+	for _, ext := range []string{".md", ".markdown", ".rst", ".adoc", ".txt"} {
+		if strings.HasSuffix(l, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 func countChangedLines(diff string) int {

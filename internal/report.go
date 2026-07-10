@@ -16,10 +16,11 @@ func RenderJSON(res Result) string {
 	return string(b)
 }
 
-// RenderMarkdown renders the summary comment body: the review-pr finding format,
-// ordered by severity, plus the ANGLES line. Used verbatim as the sticky
-// comment body and printed to stdout by `swatter run`.
-func RenderMarkdown(res Result, cfg Config) string {
+// RenderMarkdown renders the full summary body: the scope + risk read, the
+// review-pr finding format ordered by severity, plus the ANGLES line. Backs the
+// check-run details page and is printed to stdout by `swatter run`. packet may
+// be nil (no scope/risk lines then).
+func RenderMarkdown(res Result, cfg Config, packet *Packet) string {
 	var b strings.Builder
 	b.WriteString("### 🤚 Swatter review\n\n")
 
@@ -59,18 +60,24 @@ func RenderMarkdown(res Result, cfg Config) string {
 		}
 	}
 
+	if sr := renderScopeRisk(res, packet); sr != "" {
+		b.WriteString(sr)
+		b.WriteString("\n")
+	}
+
 	fmt.Fprintf(&b, "<sub>ANGLES: %s | validated=%d rejected=%d consensus=%d sweep=%s · $%.2f / %d tok</sub>\n",
 		angleLine(res.AngleCounts), res.Validated, res.Rejected, res.Consensus,
 		sweepStr(res.SweepRan), res.SpentUSD, res.SpentTokens)
 	return b.String()
 }
 
-// RenderSummaryComment is the compact sticky-comment body: the counts and the
-// ANGLES footer, with no per-finding blocks. Every finding is already posted as
-// an inline comment on the diff, so re-printing the full blocks here would
-// double each finding on the PR. Out-of-diff findings (which have no diff line
-// to anchor an inline comment to) are appended by the reporter.
-func RenderSummaryComment(res Result) string {
+// RenderSummaryComment is the compact sticky-comment body: the counts, a scope
+// + risk read of the change, and the ANGLES footer, with no per-finding blocks.
+// Every finding is already posted as an inline comment on the diff, so
+// re-printing the full blocks here would double each finding on the PR.
+// Out-of-diff findings (which have no diff line to anchor an inline comment to)
+// are appended by the reporter. packet may be nil (no scope/risk lines then).
+func RenderSummaryComment(res Result, packet *Packet) string {
 	var b strings.Builder
 	b.WriteString("### 🤚 Swatter review\n\n")
 
@@ -94,10 +101,150 @@ func RenderSummaryComment(res Result) string {
 			len(res.Findings), confirmed, plausible)
 	}
 
+	if sr := renderScopeRisk(res, packet); sr != "" {
+		b.WriteString(sr)
+		b.WriteString("\n")
+	}
+
 	fmt.Fprintf(&b, "<sub>ANGLES: %s | validated=%d rejected=%d consensus=%d sweep=%s · $%.2f / %d tok</sub>\n",
 		angleLine(res.AngleCounts), res.Validated, res.Rejected, res.Consensus,
 		sweepStr(res.SweepRan), res.SpentUSD, res.SpentTokens)
 	return b.String()
+}
+
+// renderScopeRisk frames a review with two deterministic lines — what the PR
+// touches (scope) and how much scrutiny it warrants (risk). Both read only the
+// packet and the findings, so they cost no tokens and can never contradict the
+// inline comments. Returns "" when no packet is available (local CLI paths).
+func renderScopeRisk(res Result, p *Packet) string {
+	if p == nil {
+		return ""
+	}
+	var b strings.Builder
+
+	// Scope: file count, +/- lines, sensitive areas, and test coverage of the
+	// change. "no tests" is only surfaced when real source changed.
+	add, del := p.DiffStat()
+	fmt.Fprintf(&b, "**Scope** · %s · +%d −%d", quantify(len(p.ChangedFiles), "file"), add, del)
+	if areas := priorityAreas(p.ChangedFiles); len(areas) > 0 {
+		fmt.Fprintf(&b, " · touches %s", strings.Join(areas, ", "))
+	}
+	if t := countTests(p.ChangedFiles); t > 0 {
+		fmt.Fprintf(&b, " · %s", quantify(t, "test"))
+	} else if hasProductionCode(p.ChangedFiles) {
+		b.WriteString(" · no tests")
+	}
+	b.WriteString("\n")
+
+	r := assessRisk(res, p.ChangedFiles)
+	fmt.Fprintf(&b, "**Risk** · %s %s — %s\n", r.emoji, r.label, r.reason)
+
+	if focus := reviewFocus(res, p); focus != "" {
+		b.WriteString(focus)
+	}
+	return b.String()
+}
+
+// reviewFocus is the reviewer's "look here first" line: the confirmed findings'
+// locations plus the top actionable ask, so a reviewer knows where to spend
+// attention without opening every inline thread. Deterministic, one line, and
+// capped — it returns "" when there is nothing a reviewer needs steered to (a
+// clean review that touched nothing sensitive).
+func reviewFocus(res Result, p *Packet) string {
+	var confirmed []Finding
+	for _, f := range res.Findings {
+		if f.Verdict == VerdictConfirmed {
+			confirmed = append(confirmed, f)
+		}
+	}
+
+	var items []string
+	// 1. Confirmed findings are the highest-signal places to look; list up to two.
+	for i, f := range confirmed {
+		if i == 2 {
+			items = append(items, fmt.Sprintf("+%d more confirmed", len(confirmed)-2))
+			break
+		}
+		items = append(items, fmt.Sprintf("`%s` (confirmed %s)", findingLoc(f), strings.ToLower(string(f.Severity))))
+	}
+	// 2. A source change shipping no tests is a reviewer's classic ask.
+	if countTests(p.ChangedFiles) == 0 && hasProductionCode(p.ChangedFiles) {
+		items = append(items, "no tests — ask for coverage")
+	}
+	// 3. Nothing confirmed but sensitive paths moved: steer a human pass.
+	if len(confirmed) == 0 {
+		if areas := priorityAreas(p.ChangedFiles); len(areas) > 0 {
+			items = append(items, fmt.Sprintf("hand-check the %s path", strings.Join(areas, "/")))
+		}
+	}
+
+	if len(items) == 0 {
+		return ""
+	}
+	return "**Review focus** · " + strings.Join(items, " · ") + "\n"
+}
+
+// findingLoc renders a finding's anchor as file:line, or just file when it has
+// no diff line (file-level finding).
+func findingLoc(f Finding) string {
+	if f.Line > 0 {
+		return fmt.Sprintf("%s:%d", f.File, f.Line)
+	}
+	return f.File
+}
+
+// riskLevel is a one-glance verdict on a PR: an emoji, a label, and the reason
+// behind it, derived from finding severity/verdict crossed with what the PR
+// touches.
+type riskLevel struct{ emoji, label, reason string }
+
+// assessRisk grades the review. A confirmed CRITICAL is High (block); any other
+// confirmed finding is Elevated (escalated further if it lands on a sensitive
+// path); unconfirmed findings are Moderate; a clean review is Low — nudged up a
+// note when it changed money/auth/migration paths without flagging anything.
+func assessRisk(res Result, files []string) riskLevel {
+	var critConf, conf, onSensitive int
+	for _, f := range res.Findings {
+		if isPriority(f.File) {
+			onSensitive++
+		}
+		if f.Verdict != VerdictConfirmed {
+			continue
+		}
+		conf++
+		if f.Severity == SevCritical {
+			critConf++
+		}
+	}
+	switch {
+	case critConf > 0:
+		return riskLevel{"🔴", "High",
+			fmt.Sprintf("%s confirmed critical — needs a fix before merge", quantify(critConf, "finding"))}
+	case conf > 0:
+		reason := fmt.Sprintf("%s confirmed", quantify(conf, "finding"))
+		if onSensitive > 0 {
+			reason += " on a money/auth/migration path"
+		}
+		return riskLevel{"🟠", "Elevated", reason}
+	case len(res.Findings) > 0:
+		reason := fmt.Sprintf("%s to weigh, none confirmed", quantify(len(res.Findings), "finding"))
+		if onSensitive > 0 {
+			reason += " (one on a sensitive path)"
+		}
+		return riskLevel{"🟡", "Moderate", reason}
+	case len(priorityAreas(files)) > 0:
+		return riskLevel{"🟢", "Low", "clean, but it changed sensitive paths worth a human pass"}
+	default:
+		return riskLevel{"🟢", "Low", "no findings survived validation"}
+	}
+}
+
+// quantify renders a count with a naive plural: 1 → "1 file", 3 → "3 files".
+func quantify(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 func angleLine(counts map[string]int) string {

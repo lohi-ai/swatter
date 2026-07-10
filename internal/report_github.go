@@ -65,8 +65,8 @@ func (r *Reporter) Progress(note string) {
 func (r *Reporter) Finish(ctx context.Context, res Result, packet *Packet) error {
 	// The check-run details page carries the full per-finding summary; the PR
 	// comment stays compact (findings are posted inline) to avoid doubling.
-	checkSummary := RenderMarkdown(res, r.cfg)
-	comment := RenderSummaryComment(res)
+	checkSummary := RenderMarkdown(res, r.cfg, packet)
+	comment := RenderSummaryComment(res, packet)
 	if r.gh == nil {
 		return nil
 	}
