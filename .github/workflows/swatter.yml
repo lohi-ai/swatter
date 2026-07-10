@@ -1,0 +1,26 @@
+name: swatter
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: swatter-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: swatter
+        uses: lohi-ai/swatter@v0
+        with:
+          api_key: ${{ secrets.SWATTER_API_KEY }}
+          model: claude-opus-4-8

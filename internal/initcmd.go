@@ -142,7 +142,7 @@ jobs:
         with:
           fetch-depth: 0
       - id: swatter
-        uses: lohi-ai/swatter@v1
+        uses: lohi-ai/swatter@v0
         with:
 ` + with
 }
