@@ -81,6 +81,25 @@ func TestRuleStore_Score(t *testing.T) {
 	}
 }
 
+func TestRuleStore_ScoredPRsIdempotent(t *testing.T) {
+	rs := &RuleStore{Rules: []Rule{{ID: "r-x", Rule: "a", Confidence: 0.5}}}
+	if !rs.MarkScored(7) {
+		t.Fatal("first MarkScored should report the PR as newly scored")
+	}
+	if rs.MarkScored(7) {
+		t.Fatal("second MarkScored for the same PR must report already-scored")
+	}
+	// The guard must survive a render/parse round-trip, so a re-run in a fresh
+	// CI process still sees the PR as scored and won't double-count its feedback.
+	rs2 := ParseRuleStore(rs.Render())
+	if !rs2.HasScored(7) {
+		t.Fatalf("scored-PR marker lost across render/parse: %q", rs.Render())
+	}
+	if rs2.MarkScored(7) {
+		t.Fatal("re-parsed store must still treat PR 7 as scored")
+	}
+}
+
 func TestRuleStore_ExpirePathGone(t *testing.T) {
 	rs := &RuleStore{Rules: []Rule{
 		{ID: "r-keep", Rule: "a", Confidence: 0.9, Path: "kept.go"},

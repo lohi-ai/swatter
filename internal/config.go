@@ -60,6 +60,12 @@ type Config struct {
 	// Contents-API commit of .swatter/{rules,pending}.md to the base branch.
 	PromoteAfter int
 	RulesCommit  bool
+
+	// BotLogin is the GitHub account Swatter's own comments are authored by (the
+	// default Actions token posts as github-actions[bot]). The feedback pass only
+	// trusts a finding marker on a comment from this author, so a PR participant
+	// can't forge feedback by pasting the marker into their own comment.
+	BotLogin string
 }
 
 // LoadConfig resolves a Config from the SWATTER_* environment the Action sets.
@@ -80,6 +86,7 @@ func LoadConfig() (Config, error) {
 		RepoRoot:       envDefault("SWATTER_REPO_ROOT", "."),
 		PromoteAfter:   envInt("SWATTER_RULE_PROMOTE_AFTER", 3),
 		RulesCommit:    envBool("SWATTER_RULES_COMMIT", true),
+		BotLogin:       envDefault("SWATTER_BOT_LOGIN", "github-actions[bot]"),
 	}
 
 	// A strong model is mandatory. If SWATTER_MODEL is unset, fall back to a

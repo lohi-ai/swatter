@@ -5,10 +5,13 @@ import (
 	"testing"
 )
 
+const testBotLogin = "github-actions[bot]"
+
 func swatterComment(id int64, ruleIDs []string, summary string, outdated bool) ReviewCommentData {
 	f := Finding{Candidate: Candidate{File: "a.go", Line: 3, Summary: summary, RuleIDs: ruleIDs,
 		Severity: SevMajor}, Verdict: VerdictConfirmed}
 	c := ReviewCommentData{ID: id, Body: renderInline(f), Path: "a.go", Line: 3}
+	c.User.Login = testBotLogin // authored by swatter, so the marker is trusted
 	if !outdated {
 		pos := 5
 		c.Position = &pos
@@ -80,7 +83,7 @@ func TestAnalyzeFeedbackSignals(t *testing.T) {
 	noRule := swatterComment(6, nil, "SQL built by string concat", false)
 	noRuleReply := humanReply(7, 6, "good catch")
 
-	fb := AnalyzeFeedback(42, "2026-07-11",
+	fb := AnalyzeFeedback(42, "2026-07-11", testBotLogin,
 		[]ReviewCommentData{up, down, fpReply, resolvedOnly, silent, noRule, noRuleReply},
 		map[int64]bool{4: true})
 
@@ -104,7 +107,7 @@ func TestAnalyzeFeedbackSignals(t *testing.T) {
 
 func TestAnalyzeFeedbackOutdatedIsWeakHit(t *testing.T) {
 	c := swatterComment(1, []string{"r-x"}, "off by one", true) // line changed before merge
-	fb := AnalyzeFeedback(1, "2026-07-11", []ReviewCommentData{c}, nil)
+	fb := AnalyzeFeedback(1, "2026-07-11", testBotLogin, []ReviewCommentData{c}, nil)
 	if len(fb.HitRuleIDs) != 1 || fb.HitRuleIDs[0] != "r-x" {
 		t.Fatalf("HitRuleIDs = %v, want [r-x]", fb.HitRuleIDs)
 	}
@@ -112,7 +115,7 @@ func TestAnalyzeFeedbackOutdatedIsWeakHit(t *testing.T) {
 	// …but an explicit rejection beats the implicit signal.
 	rej := swatterComment(2, []string{"r-y"}, "leak", true)
 	rejReply := humanReply(3, 2, "not an issue, the pool reclaims it")
-	fb = AnalyzeFeedback(1, "2026-07-11", []ReviewCommentData{rej, rejReply}, nil)
+	fb = AnalyzeFeedback(1, "2026-07-11", testBotLogin, []ReviewCommentData{rej, rejReply}, nil)
 	if len(fb.HitRuleIDs) != 0 || len(fb.MissRuleIDs) != 1 || fb.MissRuleIDs[0] != "r-y" {
 		t.Fatalf("explicit negative should win: hits=%v misses=%v", fb.HitRuleIDs, fb.MissRuleIDs)
 	}
@@ -132,13 +135,35 @@ func TestAnalyzeFeedbackMissedBug(t *testing.T) {
 		Body: "I wonder if we should rename this function for clarity?"}
 	inactioned.User.Login = "carol"
 
-	fb := AnalyzeFeedback(7, "2026-07-11", []ReviewCommentData{other, nit, inactioned}, nil)
+	// A markerless comment authored by swatter itself (e.g. one predating the
+	// finding marker) that was acted on must NOT be counted as another reviewer's
+	// missed bug — it's swatter's own finding.
+	oldSwatter := ReviewCommentData{ID: 13, Path: "cache.go",
+		Body: "This map access races with the eviction goroutine."}
+	oldSwatter.User.Login = testBotLogin
+	oldSwatter.Position = nil // outdated → acted on
+
+	fb := AnalyzeFeedback(7, "2026-07-11", testBotLogin,
+		[]ReviewCommentData{other, nit, inactioned, oldSwatter}, nil)
 	if len(fb.Observations) != 1 {
 		t.Fatalf("Observations = %+v, want exactly the actioned bug report", fb.Observations)
 	}
 	o := fb.Observations[0]
 	if o.Kind != ObsMissed || o.PR != 7 || o.Path != "db/tx.go" {
 		t.Fatalf("observation = %+v", o)
+	}
+}
+
+func TestAnalyzeFeedbackIgnoresForgedMarker(t *testing.T) {
+	// A non-swatter participant pastes swatter's finding marker and piles on
+	// negative signal, trying to decay r-victim. The author isn't swatter, so the
+	// marker is ignored: no miss, no swatter comment counted.
+	forged := swatterComment(1, []string{"r-victim"}, "planted", false)
+	forged.User.Login = "mallory"
+	forged.Reactions.Down = 3
+	fb := AnalyzeFeedback(1, "2026-07-11", testBotLogin, []ReviewCommentData{forged}, nil)
+	if len(fb.MissRuleIDs) != 0 || len(fb.HitRuleIDs) != 0 || fb.SwatterComments != 0 || len(fb.Observations) != 0 {
+		t.Fatalf("forged marker from non-swatter author must be ignored: %+v", fb)
 	}
 }
 

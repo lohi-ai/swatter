@@ -51,7 +51,7 @@ func RunFeedback(ctx context.Context, cfg Config, gh *GitHubClient, pr int, bran
 		resolved = nil
 	}
 	today := time.Now().Format("2006-01-02")
-	fb := AnalyzeFeedback(pr, today, comments, resolved)
+	fb := AnalyzeFeedback(pr, today, cfg.BotLogin, comments, resolved)
 	sum.SwatterComments = fb.SwatterComments
 	sum.Signals = fb.Signals
 	sum.Hits, sum.Misses = len(fb.HitRuleIDs), len(fb.MissRuleIDs)
@@ -87,14 +87,16 @@ func RunFeedback(ctx context.Context, cfg Config, gh *GitHubClient, pr int, bran
 	ledger.Prune(time.Now())
 
 	store := ParseRuleStore(rulesMD)
-	store.Score(fb.HitRuleIDs, fb.MissRuleIDs, time.Now())
+	if !store.HasScored(pr) {
+		store.Score(fb.HitRuleIDs, fb.MissRuleIDs, time.Now())
+	}
 	promoted, err := deps.PromoteObservations(ctx, ledger, store, cfg.PromoteAfter)
 	if err != nil {
 		// Promotion is an enhancement on top of scoring — degrade, don't fail.
 		progress(fmt.Sprintf("promotion skipped: %v", err))
 	}
 	sum.RulesPromoted = promoted
-	spentIDs := spentObservationIDs(pendingMD, fb.Observations, ledger)
+	spentIDs := spentObservations(pendingMD, fb.Observations, ledger)
 	promotedRules := promotedSince(rulesMD, store)
 	if promoted > 0 {
 		progress(fmt.Sprintf("promoted %d observation cluster(s) into rules", promoted))
@@ -103,6 +105,8 @@ func RunFeedback(ctx context.Context, cfg Config, gh *GitHubClient, pr int, bran
 	if !cfg.RulesCommit {
 		fmt.Println("swatter learn (suggestion mode — SWATTER_RULES_COMMIT=0): computed rule book:")
 		fmt.Print(store.Render())
+		fmt.Println("\ncomputed pending observations:")
+		fmt.Print(ledger.Render())
 		return sum, nil
 	}
 
@@ -113,7 +117,12 @@ func RunFeedback(ctx context.Context, cfg Config, gh *GitHubClient, pr int, bran
 	pathExists := repoPathChecker(cfg.RepoRoot)
 	changed, err := commitFileCAS(ctx, gh, rulesPath, branch, msg, func(current string) (string, error) {
 		s := ParseRuleStore(current)
-		s.Score(fb.HitRuleIDs, fb.MissRuleIDs, time.Now())
+		// Idempotent scoring: only fold this PR's feedback in once, even across a
+		// re-run or a retry after a partial commit. MarkScored persists in the
+		// rendered book, so the guard holds across stateless CI runs.
+		if s.MarkScored(pr) {
+			s.Score(fb.HitRuleIDs, fb.MissRuleIDs, time.Now())
+		}
 		for _, r := range promotedRules {
 			// Re-insert with the cheap normalized prefilter only: the LLM judge
 			// already vetted this rule against the book fetched moments ago.
@@ -137,7 +146,7 @@ func RunFeedback(ctx context.Context, cfg Config, gh *GitHubClient, pr int, bran
 			l.Add(o)
 		}
 		l.Prune(time.Now())
-		l.Remove(spentIDs)
+		l.RemoveIdentities(spentIDs)
 		return l.Render(), nil
 	})
 	if err != nil {
@@ -152,23 +161,29 @@ func RunFeedback(ctx context.Context, cfg Config, gh *GitHubClient, pr int, bran
 	return sum, nil
 }
 
-// spentObservationIDs returns the ids that promotion consumed: entries present
-// in the pre-promotion ledger (original file + this run's additions) but gone
-// from the post-promotion one. Prune removals are recomputed inside the CAS
-// mutation, so only promotion-spent ids need carrying across.
-func spentObservationIDs(originalMD string, added []Observation, after *ObsLedger) []string {
+// spentObservations returns the identities that promotion consumed: entries
+// present in the pre-promotion ledger (original file + this run's additions) but
+// gone from the post-promotion one. Prune removals are recomputed inside the CAS
+// mutation, so only promotion-spent entries matter here.
+//
+// It returns (PR, normalized-note) identities, not generated ids: the CAS
+// mutation refetches a possibly-changed pending.md and reassigns ids, so an id
+// captured here (o-<date>-<seq>) can collide with a concurrent run's unrelated
+// entry — removing by identity instead deletes exactly the observation Add would
+// have deduped, and nothing else.
+func spentObservations(originalMD string, added []Observation, after *ObsLedger) []obsIdentity {
 	before := ParseObsLedger(originalMD)
 	for _, o := range added {
 		before.Add(o)
 	}
-	still := map[string]bool{}
+	still := map[obsIdentity]bool{}
 	for _, o := range after.Obs {
-		still[o.ID] = true
+		still[o.identity()] = true
 	}
-	var spent []string
+	var spent []obsIdentity
 	for _, o := range before.Obs {
-		if !still[o.ID] {
-			spent = append(spent, o.ID)
+		if !still[o.identity()] {
+			spent = append(spent, o.identity())
 		}
 	}
 	return spent

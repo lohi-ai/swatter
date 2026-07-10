@@ -168,6 +168,40 @@ func (l *ObsLedger) Get(id string) (Observation, bool) {
 	return Observation{}, false
 }
 
+// obsIdentity names an observation independently of its generated id: the PR it
+// came from plus its normalized note. Add dedups on exactly this pair, so an
+// identity is unique within a ledger — which makes it the safe key for removing
+// a promoted cluster's members across a Contents-API refetch, where regenerated
+// ids (o-<date>-<seq>) can otherwise collide with a concurrent run's entries.
+type obsIdentity struct {
+	PR   int
+	Note string // normalized
+}
+
+func (o Observation) identity() obsIdentity {
+	return obsIdentity{PR: o.PR, Note: normalizeRule(o.Note)}
+}
+
+// RemoveIdentities drops observations whose (PR, normalized-note) identity is in
+// ids. Unlike Remove (by generated id), this survives a refetch that reassigned
+// ids, so promoting a cluster never deletes an unrelated concurrent observation.
+func (l *ObsLedger) RemoveIdentities(ids []obsIdentity) {
+	if len(ids) == 0 {
+		return
+	}
+	drop := make(map[obsIdentity]bool, len(ids))
+	for _, id := range ids {
+		drop[id] = true
+	}
+	kept := l.Obs[:0]
+	for _, o := range l.Obs {
+		if !drop[o.identity()] {
+			kept = append(kept, o)
+		}
+	}
+	l.Obs = kept
+}
+
 // Remove drops the given ids — used after their cluster is promoted to a rule.
 func (l *ObsLedger) Remove(ids []string) {
 	drop := toSet(ids)

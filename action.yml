@@ -58,6 +58,14 @@ inputs:
     description: Observation weight a same-pattern cluster needs before it becomes a rule (missed-bug evidence weighs 2, repeats 1; always requires ≥2 distinct PRs).
     required: false
     default: '3'
+  bot_login:
+    description: >-
+      Post-merge learn flow only: the GitHub login Swatter's own comments are
+      authored by. Feedback is only scored from findings by this author, so a PR
+      participant can't forge it by pasting the finding marker. Defaults to the
+      Actions bot; set this if you post with a custom App/PAT.
+    required: false
+    default: 'github-actions[bot]'
   github_token:
     description: Token for posting the check run + comments. Defaults to the workflow GITHUB_TOKEN.
     required: false
@@ -87,5 +95,6 @@ runs:
     SWATTER_PRICE_PER_MTOK_OUT: ${{ inputs.price_per_mtok_out }}
     SWATTER_RULES_COMMIT: ${{ inputs.rules_commit }}
     SWATTER_RULE_PROMOTE_AFTER: ${{ inputs.rule_promote_after }}
+    SWATTER_BOT_LOGIN: ${{ inputs.bot_login }}
     SWATTER_GITHUB_TOKEN: ${{ inputs.github_token }}
     SWATTER_REPO_ROOT: /github/workspace

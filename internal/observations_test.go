@@ -91,6 +91,37 @@ func TestClusterEvidence(t *testing.T) {
 	}
 }
 
+func TestRemoveIdentitiesSurvivesIDReassignment(t *testing.T) {
+	// Promotion planning spends PR 1's observation (id o-2026-07-11-1). On the
+	// CAS refetch, a concurrent run has already landed a DIFFERENT observation
+	// that now occupies that same generated id. Removing by id would delete the
+	// concurrent entry; removing by (PR, note) identity deletes only PR 1's.
+	planned := Observation{Kind: ObsMissed, PR: 1, Date: "2026-07-11", Note: "lock leak on error"}
+	plan := &ObsLedger{}
+	plan.Add(planned)
+	spent := spentIdentityOf(planned)
+	if plan.Obs[0].ID != "o-2026-07-11-1" {
+		t.Fatalf("precondition: planned id = %q", plan.Obs[0].ID)
+	}
+
+	current := &ObsLedger{}
+	current.Add(Observation{Kind: ObsRepeat, PR: 2, Date: "2026-07-11", Note: "unrelated concurrent finding"})
+	current.Add(planned) // this run re-adds its own; here it gets o-...-2
+	if current.Obs[0].ID != "o-2026-07-11-1" {
+		t.Fatalf("precondition: concurrent entry should hold the colliding id, got %q", current.Obs[0].ID)
+	}
+
+	current.RemoveIdentities([]obsIdentity{spent})
+	if len(current.Obs) != 1 || current.Obs[0].PR != 2 {
+		t.Fatalf("identity removal deleted the wrong observation: %+v", current.Obs)
+	}
+}
+
+func spentIdentityOf(o Observation) obsIdentity {
+	o.Note = collapseSpaces(oneLine(o.Note))
+	return o.identity()
+}
+
 func TestObsLedgerEmptyRender(t *testing.T) {
 	l := ParseObsLedger("")
 	if len(l.Obs) != 0 {

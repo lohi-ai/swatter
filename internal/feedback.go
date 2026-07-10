@@ -71,7 +71,16 @@ type PRFeedback struct {
 }
 
 // AnalyzeFeedback classifies every swatter inline comment on a merged PR.
-// resolved maps review-comment id → thread-resolved (may be nil: no data).
+// swatterLogin is the GitHub account swatter posts as (github-actions[bot] under
+// the default token); resolved maps review-comment id → thread-resolved (may be
+// nil: no data).
+//
+// A comment is only treated as one of swatter's findings when it BOTH carries
+// the finding marker AND is authored by swatterLogin — the marker is public
+// text any participant can copy, so trusting it alone would let a reviewer forge
+// feedback that scores arbitrary rules. A marker on a non-swatter comment is
+// ignored; a swatter comment without a marker (e.g. one predating the marker) is
+// skipped rather than mistaken for another reviewer's missed bug.
 //
 // Signal model, most explicit wins:
 //   - explicit: 👍/👎 reactions on the comment plus classified replies
@@ -81,7 +90,7 @@ type PRFeedback struct {
 //     an outdated anchor (the flagged line was changed before merge) is a weak
 //     hit — the finding was very likely acted on.
 //   - nothing → no signal; silence never decays a rule.
-func AnalyzeFeedback(pr int, date string, comments []ReviewCommentData, resolved map[int64]bool) PRFeedback {
+func AnalyzeFeedback(pr int, date, swatterLogin string, comments []ReviewCommentData, resolved map[int64]bool) PRFeedback {
 	var fb PRFeedback
 
 	replies := map[int64][]ReviewCommentData{}
@@ -91,12 +100,22 @@ func AnalyzeFeedback(pr int, date string, comments []ReviewCommentData, resolved
 		}
 	}
 
+	fromSwatter := func(c ReviewCommentData) bool {
+		return swatterLogin != "" && strings.EqualFold(c.User.Login, swatterLogin)
+	}
+
 	for _, c := range comments {
 		if c.InReplyToID != 0 {
 			continue // threads are scored at their root
 		}
-		marker, isSwatter := parseFindingMarker(c.Body)
-		if isSwatter {
+		marker, hasMarker := parseFindingMarker(c.Body)
+		if hasMarker {
+			// Only score a marked comment that genuinely came from swatter. A
+			// forged marker from any other author is ignored — neither scored as
+			// a hit/miss nor counted as a missed bug.
+			if !fromSwatter(c) {
+				continue
+			}
 			fb.SwatterComments++
 			sig := classifyThread(c, replies[c.ID], resolved)
 			if sig == 0 {
@@ -115,6 +134,13 @@ func AnalyzeFeedback(pr int, date string, comments []ReviewCommentData, resolved
 			case sig < 0:
 				fb.MissRuleIDs = append(fb.MissRuleIDs, marker.RuleIDs...)
 			}
+			continue
+		}
+
+		// No marker. A markerless swatter comment (e.g. backfilled/pre-marker) is
+		// its own finding, not another reviewer's — skip it, don't score it as a
+		// missed bug.
+		if fromSwatter(c) {
 			continue
 		}
 
