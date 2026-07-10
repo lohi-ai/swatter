@@ -10,8 +10,7 @@ except the model calls you configure.
 ## Why another reviewer?
 
 Most AI reviewers do a **single pass** and post whatever the model says — noise
-is the #1 complaint. Swatter runs the
-[review-pr](https://github.com/lohi-ai/swatter/blob/main/docs) pipeline:
+is the #1 complaint. Swatter runs a find-then-verify pipeline instead:
 
 1. **Finders** — up to eight independent angles (line-by-line, removed-behavior,
    cross-file, security, cleanup, conventions, conformance, pattern-consistency)
@@ -21,7 +20,8 @@ is the #1 complaint. Swatter runs the
    path. Rejects speculation; keeps what it can prove.
 3. **A living rule book** (`.swatter/rules.md`) — confirmed findings teach
    rules; the book dedups, scores by hit/miss, and expires stale entries, so the
-   bot gets sharper on *your* codebase over time.
+   bot gets sharper on *your* codebase over time
+   ([how it works](docs/DESIGN-RULEBOOK.md)).
 
 ## Quickstart
 
@@ -93,9 +93,12 @@ SWATTER_LIVE_TEST=1 SWATTER_API_KEY=… SWATTER_MODEL=… \
   go test ./internal -run TestPipelineFixture   # live fixture replay
 ```
 
-Swatter consumes agentcore from `github.com/lohi-ai/agentray`. During local
-development `go.mod` has a `replace` pointing at a sibling checkout; the release
-build resolves the pinned tag from the module proxy.
+Swatter consumes agentcore from
+[`github.com/lohi-ai/agentray`](https://github.com/lohi-ai/agentray), pinned in
+`go.mod` and resolved from the module proxy — no extra setup to build. To hack on
+agentcore and Swatter together, add a local
+`replace github.com/lohi-ai/agentray => ../agentray` pointing at a sibling
+checkout (and drop it before committing).
 
 ## License
 
