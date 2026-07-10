@@ -33,7 +33,7 @@ func (t *ProgressTracker) RenderLive() string {
 	defer t.mu.Unlock()
 	var b strings.Builder
 	b.WriteString(StickyMarker + "\n")
-	b.WriteString("### 🪰 Swatter is reviewing…\n\n")
+	b.WriteString("### 🤚 Swatter is reviewing…\n\n")
 	for _, n := range t.notes {
 		fmt.Fprintf(&b, "- [x] %s\n", n)
 	}

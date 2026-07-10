@@ -21,7 +21,7 @@ func RenderJSON(res Result) string {
 // comment body and printed to stdout by `swatter run`.
 func RenderMarkdown(res Result, cfg Config) string {
 	var b strings.Builder
-	b.WriteString("### 🪰 Swatter review\n\n")
+	b.WriteString("### 🤚 Swatter review\n\n")
 
 	if res.TrivialPass != "" {
 		fmt.Fprintf(&b, "**PASS** — %s.\n", res.TrivialPass)
@@ -72,7 +72,7 @@ func RenderMarkdown(res Result, cfg Config) string {
 // to anchor an inline comment to) are appended by the reporter.
 func RenderSummaryComment(res Result) string {
 	var b strings.Builder
-	b.WriteString("### 🪰 Swatter review\n\n")
+	b.WriteString("### 🤚 Swatter review\n\n")
 
 	if res.TrivialPass != "" {
 		fmt.Fprintf(&b, "**PASS** — %s.\n", res.TrivialPass)

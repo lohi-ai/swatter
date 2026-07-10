@@ -94,7 +94,7 @@ func (r *Reporter) Finish(ctx context.Context, res Result, packet *Packet) error
 	}
 
 	if len(inline) > 0 {
-		body := fmt.Sprintf("🪰 Swatter posted %d inline comment(s). Full summary below.", len(inline))
+		body := fmt.Sprintf("🤚 Swatter posted %d inline comment(s). Full summary below.", len(inline))
 		if err := r.gh.CreateReview(ctx, r.pr, r.headSHA, body, inline); err != nil {
 			// Non-fatal: fall through to the summary comment, which carries
 			// every finding anyway.
@@ -160,7 +160,7 @@ func (r *Reporter) conclusion(res Result) (conclusion, title string) {
 
 func renderInline(f Finding) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "**🪰 %s %s** — %s\n\n", f.Severity, strings.ToLower(string(f.Verdict)), f.Summary)
+	fmt.Fprintf(&b, "**🤚 %s %s** — %s\n\n", f.Severity, strings.ToLower(string(f.Verdict)), f.Summary)
 	if f.FailureScenario != "" {
 		fmt.Fprintf(&b, "*Scenario:* %s\n\n", f.FailureScenario)
 	}

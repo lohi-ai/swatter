@@ -1,4 +1,4 @@
-# 🪰 Swatter
+# 🤚 Swatter
 
 **A PR-review bugbot that swats bugs before they land** — validated findings
 (low noise) and a *living* rule book, built on
