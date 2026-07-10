@@ -22,9 +22,9 @@ type FailOn string
 
 const (
 	FailOnCritical FailOn = "critical" // red only on a CRITICAL
-	FailOnMajor    FailOn = "major"    // red on MAJOR or worse (default)
+	FailOnMajor    FailOn = "major"    // red on MAJOR or worse
 	FailOnAny      FailOn = "any"      // red on any finding, incl. MINOR
-	FailOnNever    FailOn = "never"    // always neutral/success — advisory mode
+	FailOnNever    FailOn = "never"    // advisory: green check + comments (default)
 )
 
 // Config is the fully-resolved run configuration. Built from environment
@@ -69,7 +69,7 @@ func LoadConfig() (Config, error) {
 		MaxTokensTotal: envInt("SWATTER_MAX_TOKENS_TOTAL", 8_000_000),
 		PricePerMTokIn: envFloat("SWATTER_PRICE_PER_MTOK_IN", 0),
 		PricePerMTokOut: envFloat("SWATTER_PRICE_PER_MTOK_OUT", 0),
-		FailOn:         FailOn(envDefault("SWATTER_FAIL_ON", string(FailOnMajor))),
+		FailOn:         FailOn(envDefault("SWATTER_FAIL_ON", string(FailOnNever))),
 		RepoRoot:       envDefault("SWATTER_REPO_ROOT", "."),
 	}
 

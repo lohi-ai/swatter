@@ -69,7 +69,7 @@ advisory mode, fork-PR safety) in [docs/recipes.md](docs/recipes.md).
 | `base_url` | — | required for `openai-compat`. |
 | `model` | `claude-opus-4-8`\* | strong tier (bug/security angles, large diffs). |
 | `model_cheap` | = `model` | cheaper tier for cleanup angles on small diffs. |
-| `fail_on` | `major` | check-run red threshold: `critical`/`major`/`any`/`never`. |
+| `fail_on` | `never` | advisory by default (green check + comments). Set `critical`/`major`/`any` to gate merges — the `Swatter` check goes red on confirmed findings. |
 | `max_usd` | `5` | per-PR spend ceiling (priced models). |
 | `max_tokens_total` | `8000000` | always-works ceiling for unknown-priced models. |
 | `price_per_mtok_in`/`_out` | `0` | teach the ledger a custom model's price. |

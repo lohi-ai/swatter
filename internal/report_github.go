@@ -128,7 +128,9 @@ func (r *Reporter) Finish(ctx context.Context, res Result, packet *Packet) error
 }
 
 // conclusion maps findings to a check-run conclusion under fail_on. Only
-// CONFIRMED findings can turn it red; PLAUSIBLE is advisory (neutral).
+// CONFIRMED findings can turn it red, and only when fail_on opts into gating.
+// The default (fail_on=never) is advisory: findings are surfaced as comments
+// and the check stays green, so the PR shows one passing Swatter status.
 func (r *Reporter) conclusion(res Result) (conclusion, title string) {
 	worstFail := false
 	confirmed, total := 0, len(res.Findings)
@@ -145,6 +147,10 @@ func (r *Reporter) conclusion(res Result) (conclusion, title string) {
 		return "success", "No review needed — " + res.TrivialPass
 	case worstFail:
 		return "failure", fmt.Sprintf("%d finding(s), %d confirmed", total, confirmed)
+	case total > 0 && r.cfg.FailOn == FailOnNever:
+		// Advisory mode: findings are informational — green check, details in
+		// the inline comments. Gating is opt-in via fail_on.
+		return "success", fmt.Sprintf("%d finding(s), %d confirmed — advisory (see comments)", total, confirmed)
 	case total > 0:
 		return "neutral", fmt.Sprintf("%d finding(s), %d confirmed (below fail threshold)", total, confirmed)
 	default:

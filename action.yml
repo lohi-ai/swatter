@@ -28,9 +28,9 @@ inputs:
     required: false
     default: ''
   fail_on:
-    description: 'Check-run red threshold: critical | major (default) | any | never.'
+    description: 'Check-run red threshold: never (default, advisory — green check + comments) | critical | major | any.'
     required: false
-    default: major
+    default: never
   max_usd:
     description: Per-PR spend ceiling (uses agentcore pricing for known models).
     required: false
