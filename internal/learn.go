@@ -66,11 +66,11 @@ func RunFeedback(ctx context.Context, cfg Config, gh *GitHubClient, pr int, bran
 	// 2. Fetch the book + ledger as they stand on the base branch and decide
 	// promotions once (the LLM steps). The CAS mutations below re-apply these
 	// decisions deterministically, so a retry never re-bills the clustering.
-	rulesMD, _, _, err := gh.GetContent(ctx, rulesPath, branch)
+	rulesMD, rulesSHA, _, err := gh.GetContent(ctx, rulesPath, branch)
 	if err != nil {
 		return sum, fmt.Errorf("read %s: %w", rulesPath, err)
 	}
-	pendingMD, _, _, err := gh.GetContent(ctx, pendingPath, branch)
+	pendingMD, pendingSHA, _, err := gh.GetContent(ctx, pendingPath, branch)
 	if err != nil {
 		return sum, fmt.Errorf("read %s: %w", pendingPath, err)
 	}
@@ -115,6 +115,7 @@ func RunFeedback(ctx context.Context, cfg Config, gh *GitHubClient, pr int, bran
 	// reject — self-healing, never double-counted.
 	msg := fmt.Sprintf("chore(swatter): learn from PR #%d feedback [skip ci]", pr)
 	pathExists := repoPathChecker(cfg.RepoRoot)
+	judge := deps.sameRuleJudge()
 	changed, err := commitFileCAS(ctx, gh, rulesPath, branch, msg, func(current string) (string, error) {
 		s := ParseRuleStore(current)
 		// Idempotent scoring: only fold this PR's feedback in once, even across a
@@ -123,16 +124,23 @@ func RunFeedback(ctx context.Context, cfg Config, gh *GitHubClient, pr int, bran
 		if s.MarkScored(pr) {
 			s.Score(fb.HitRuleIDs, fb.MissRuleIDs, time.Now())
 		}
+		// Re-insert promoted rules. When the fetched book is byte-identical to the
+		// one promotion vetted against, the cheap normalized prefilter suffices
+		// (nil judge — no re-billing). If a concurrent merge changed it under us,
+		// re-run the semantic judge so a paraphrased duplicate that racing commit
+		// added is still caught.
+		reinsertJudge := SameRuleJudge(nil)
+		if current != rulesMD {
+			reinsertJudge = judge
+		}
 		for _, r := range promotedRules {
-			// Re-insert with the cheap normalized prefilter only: the LLM judge
-			// already vetted this rule against the book fetched moments ago.
-			if _, err := s.Insert(ctx, r, nil); err != nil {
+			if _, err := s.Insert(ctx, r, reinsertJudge); err != nil {
 				return "", err
 			}
 		}
 		s.Expire(time.Now(), pathExists, 0)
 		return s.Render(), nil
-	})
+	}, &contentSeed{content: rulesMD, sha: rulesSHA})
 	if err != nil {
 		return sum, fmt.Errorf("commit rules: %w", err)
 	}
@@ -148,7 +156,7 @@ func RunFeedback(ctx context.Context, cfg Config, gh *GitHubClient, pr int, bran
 		l.Prune(time.Now())
 		l.RemoveIdentities(spentIDs)
 		return l.Render(), nil
-	})
+	}, &contentSeed{content: pendingMD, sha: pendingSHA})
 	if err != nil {
 		return sum, fmt.Errorf("commit pending: %w", err)
 	}

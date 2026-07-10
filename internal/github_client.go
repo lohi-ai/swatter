@@ -221,10 +221,11 @@ type ReviewCommentData struct {
 // Outdated reports whether the commented line was changed by a later commit.
 func (rc ReviewCommentData) Outdated() bool { return rc.Position == nil }
 
-// ListReviewComments fetches every inline review comment on a PR (paginated).
+// ListReviewComments fetches every inline review comment on a PR, following
+// pagination to the end so feedback on a very large PR is never truncated.
 func (c *GitHubClient) ListReviewComments(ctx context.Context, pr int) ([]ReviewCommentData, error) {
 	var all []ReviewCommentData
-	for page := 1; page <= 10; page++ {
+	for page := 1; ; page++ {
 		var batch []ReviewCommentData
 		err := c.do(ctx, http.MethodGet,
 			fmt.Sprintf("/repos/%s/%s/pulls/%d/comments?per_page=100&page=%d", c.owner, c.repo, pr, page), nil, &batch)
@@ -233,7 +234,7 @@ func (c *GitHubClient) ListReviewComments(ctx context.Context, pr int) ([]Review
 		}
 		all = append(all, batch...)
 		if len(batch) < 100 {
-			break
+			break // last (short) page — a full page means there may be more
 		}
 	}
 	return all, nil
@@ -241,43 +242,60 @@ func (c *GitHubClient) ListReviewComments(ctx context.Context, pr int) ([]Review
 
 // ThreadResolution returns, per review-comment id, whether its review thread
 // was resolved. Thread resolution is not exposed over REST, so this is the one
-// GraphQL call swatter makes. Best-effort: callers treat an error as "no
-// resolution data" rather than failing the feedback pass.
+// GraphQL call swatter makes. It follows the reviewThreads cursor to the end so
+// resolutions on a PR with many threads aren't silently dropped. Best-effort:
+// callers treat an error as "no resolution data" rather than failing the pass.
 func (c *GitHubClient) ThreadResolution(ctx context.Context, pr int) (map[int64]bool, error) {
-	const q = `query($owner:String!,$repo:String!,$pr:Int!){
+	const q = `query($owner:String!,$repo:String!,$pr:Int!,$cursor:String){
   repository(owner:$owner,name:$repo){ pullRequest(number:$pr){
-    reviewThreads(first:100){ nodes{ isResolved comments(first:50){ nodes{ databaseId } } } }
+    reviewThreads(first:100, after:$cursor){
+      pageInfo{ hasNextPage endCursor }
+      nodes{ isResolved comments(first:50){ nodes{ databaseId } } }
+    }
   } } }`
-	body := map[string]any{
-		"query":     q,
-		"variables": map[string]any{"owner": c.owner, "repo": c.repo, "pr": pr},
-	}
-	var res struct {
-		Data struct {
-			Repository struct {
-				PullRequest struct {
-					ReviewThreads struct {
-						Nodes []struct {
-							IsResolved bool `json:"isResolved"`
-							Comments   struct {
-								Nodes []struct {
-									DatabaseID int64 `json:"databaseId"`
-								} `json:"nodes"`
-							} `json:"comments"`
-						} `json:"nodes"`
-					} `json:"reviewThreads"`
-				} `json:"pullRequest"`
-			} `json:"repository"`
-		} `json:"data"`
-	}
-	if err := c.do(ctx, http.MethodPost, "/graphql", body, &res); err != nil {
-		return nil, err
-	}
 	out := map[int64]bool{}
-	for _, th := range res.Data.Repository.PullRequest.ReviewThreads.Nodes {
-		for _, cm := range th.Comments.Nodes {
-			out[cm.DatabaseID] = th.IsResolved
+	var cursor *string
+	for {
+		body := map[string]any{
+			"query":     q,
+			"variables": map[string]any{"owner": c.owner, "repo": c.repo, "pr": pr, "cursor": cursor},
 		}
+		var res struct {
+			Data struct {
+				Repository struct {
+					PullRequest struct {
+						ReviewThreads struct {
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+							Nodes []struct {
+								IsResolved bool `json:"isResolved"`
+								Comments   struct {
+									Nodes []struct {
+										DatabaseID int64 `json:"databaseId"`
+									} `json:"nodes"`
+								} `json:"comments"`
+							} `json:"nodes"`
+						} `json:"reviewThreads"`
+					} `json:"pullRequest"`
+				} `json:"repository"`
+			} `json:"data"`
+		}
+		if err := c.do(ctx, http.MethodPost, "/graphql", body, &res); err != nil {
+			return nil, err
+		}
+		threads := res.Data.Repository.PullRequest.ReviewThreads
+		for _, th := range threads.Nodes {
+			for _, cm := range th.Comments.Nodes {
+				out[cm.DatabaseID] = th.IsResolved
+			}
+		}
+		if !threads.PageInfo.HasNextPage || threads.PageInfo.EndCursor == "" {
+			break
+		}
+		end := threads.PageInfo.EndCursor
+		cursor = &end
 	}
 	return out, nil
 }

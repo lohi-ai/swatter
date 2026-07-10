@@ -23,17 +23,33 @@ type contentsAPI interface {
 
 const commitCASRetries = 3
 
+// contentSeed is a pre-fetched (content, sha) for a file, letting commitFileCAS
+// skip its first GET by reusing a read the caller already made for planning. On
+// a CAS conflict the loop refetches as usual, so a stale seed costs at most one
+// extra retry — never correctness.
+type contentSeed struct {
+	content string
+	sha     string
+}
+
 // commitFileCAS reads path on branch, applies mutate to the current content,
 // and writes the result back guarded by the read sha. mutate must be safe to
-// re-run on fresh content (it is, on a conflict). Returns whether a commit was
-// actually made — an unchanged file is skipped, which keeps re-runs of the
-// learn flow from stacking empty commits.
-func commitFileCAS(ctx context.Context, gh contentsAPI, path, branch, message string, mutate func(current string) (string, error)) (bool, error) {
+// re-run on fresh content (it is, on a conflict). When seed is non-nil its
+// content/sha are used for the first attempt instead of a GET. Returns whether
+// a commit was actually made — an unchanged file is skipped, which keeps re-runs
+// of the learn flow from stacking empty commits.
+func commitFileCAS(ctx context.Context, gh contentsAPI, path, branch, message string, mutate func(current string) (string, error), seed *contentSeed) (bool, error) {
 	var lastErr error
 	for attempt := 0; attempt < commitCASRetries; attempt++ {
-		current, sha, _, err := gh.GetContent(ctx, path, branch)
-		if err != nil {
-			return false, fmt.Errorf("get %s@%s: %w", path, branch, err)
+		var current, sha string
+		if attempt == 0 && seed != nil {
+			current, sha = seed.content, seed.sha
+		} else {
+			var err error
+			current, sha, _, err = gh.GetContent(ctx, path, branch)
+			if err != nil {
+				return false, fmt.Errorf("get %s@%s: %w", path, branch, err)
+			}
 		}
 		next, err := mutate(current)
 		if err != nil {
