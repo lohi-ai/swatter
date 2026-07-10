@@ -80,10 +80,19 @@ type Finding struct {
 	Rationale string  `json:"rationale"`
 }
 
-// Key identifies a candidate for dedup: same file + line + normalized summary
-// is one root cause. Two finders hitting it is a strong prior, not two findings.
+// Key identifies a candidate for dedup. A finding is anchored to file:line, and
+// two finders hitting the same line are almost always the same root cause
+// described differently — folding the summary text into the key (as an earlier
+// version did) let angle A and angle D each post a separate inline comment on
+// one line. So same file + line collapses to one finding (highest severity
+// wins, angles merge into a consensus). Line 0 is file-level (no diff line to
+// anchor to), so there we keep the normalized summary to avoid over-merging
+// distinct file-level findings.
 func (c Candidate) Key() string {
-	return fmt.Sprintf("%s:%d:%s", c.File, c.Line, strings.ToLower(strings.TrimSpace(c.Summary)))
+	if c.Line > 0 {
+		return fmt.Sprintf("%s:%d", c.File, c.Line)
+	}
+	return fmt.Sprintf("%s:0:%s", c.File, strings.ToLower(strings.TrimSpace(c.Summary)))
 }
 
 // ParseCandidates decodes a finder's JSON array output. It tolerates the model

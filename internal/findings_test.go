@@ -42,8 +42,11 @@ func TestParseCandidates_NoArray(t *testing.T) {
 
 func TestDedupCandidates_MergesConsensus(t *testing.T) {
 	in := []Candidate{
-		{File: "a.go", Line: 5, Summary: "Nil deref", Angle: "A", Severity: SevMajor},
-		{File: "a.go", Line: 5, Summary: "nil deref  ", Angle: "C", Severity: SevCritical},
+		// Same line, deliberately different wording (as angle A and angle D
+		// describe one defect) — must still collapse to a single finding so the
+		// diff gets one inline comment, not two.
+		{File: "a.go", Line: 5, Summary: "index i <= len(items) runs one past the end", Angle: "A", Severity: SevMajor},
+		{File: "a.go", Line: 5, Summary: "loop condition allows out-of-range access", Angle: "C", Severity: SevCritical},
 		{File: "b.go", Line: 1, Summary: "other", Angle: "D", Severity: SevMinor},
 	}
 	got := DedupCandidates(in)

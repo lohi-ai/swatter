@@ -65,6 +65,41 @@ func RenderMarkdown(res Result, cfg Config) string {
 	return b.String()
 }
 
+// RenderSummaryComment is the compact sticky-comment body: the counts and the
+// ANGLES footer, with no per-finding blocks. Every finding is already posted as
+// an inline comment on the diff, so re-printing the full blocks here would
+// double each finding on the PR. Out-of-diff findings (which have no diff line
+// to anchor an inline comment to) are appended by the reporter.
+func RenderSummaryComment(res Result) string {
+	var b strings.Builder
+	b.WriteString("### 🪰 Swatter review\n\n")
+
+	if res.TrivialPass != "" {
+		fmt.Fprintf(&b, "**PASS** — %s.\n", res.TrivialPass)
+		return b.String()
+	}
+
+	confirmed, plausible := 0, 0
+	for _, f := range res.Findings {
+		if f.Verdict == VerdictConfirmed {
+			confirmed++
+		} else {
+			plausible++
+		}
+	}
+	if len(res.Findings) == 0 {
+		b.WriteString("**PASS** — no findings survived validation.\n\n")
+	} else {
+		fmt.Fprintf(&b, "**%d finding(s)** — %d confirmed, %d plausible. Details are inline on the diff.\n\n",
+			len(res.Findings), confirmed, plausible)
+	}
+
+	fmt.Fprintf(&b, "<sub>ANGLES: %s | validated=%d rejected=%d consensus=%d sweep=%s · $%.2f / %d tok</sub>\n",
+		angleLine(res.AngleCounts), res.Validated, res.Rejected, res.Consensus,
+		sweepStr(res.SweepRan), res.SpentUSD, res.SpentTokens)
+	return b.String()
+}
+
 func angleLine(counts map[string]int) string {
 	var parts []string
 	for _, a := range AllAngles {

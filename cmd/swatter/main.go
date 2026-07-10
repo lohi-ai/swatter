@@ -117,6 +117,14 @@ func cmdRun(args []string) int {
 	// Expose findings JSON as an Action step output when running under Actions.
 	writeActionOutput(res)
 
+	// When the Swatter check run is live it carries the pass/fail verdict
+	// (its conclusion is derived from fail_on), so the wrapping Actions job
+	// stays green — "Swatter" is the single authoritative check and the job
+	// itself is a passive runner. Fall back to the exit code only outside a
+	// check-run context (local CLI / scripting).
+	if reporter != nil {
+		return 0
+	}
 	return internal.ExitCode(cfg, res)
 }
 

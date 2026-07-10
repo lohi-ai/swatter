@@ -63,17 +63,28 @@ func (r *Reporter) Progress(note string) {
 // Finish posts the inline comments, the final summary, and completes the check
 // run. packet supplies the diff for line-mapping.
 func (r *Reporter) Finish(ctx context.Context, res Result, packet *Packet) error {
-	summary := RenderMarkdown(res, r.cfg)
+	// The check-run details page carries the full per-finding summary; the PR
+	// comment stays compact (findings are posted inline) to avoid doubling.
+	checkSummary := RenderMarkdown(res, r.cfg)
+	comment := RenderSummaryComment(res)
 	if r.gh == nil {
 		return nil
 	}
 
 	// Split findings into in-diff (inline comments) and out-of-diff (summary).
+	// Findings are severity-sorted, so the first one to claim a (path, line)
+	// is the most severe — a guard against a later sweep re-commenting a line.
 	dm := BuildDiffMap(packet.Diff)
+	seen := map[string]bool{}
 	var inline []reviewComment
 	var outOfDiff []Finding
 	for _, f := range res.Findings {
 		if f.Line > 0 && dm.Commentable(f.File, f.Line) {
+			key := fmt.Sprintf("%s:%d", f.File, f.Line)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
 			inline = append(inline, reviewComment{
 				Path: f.File, Line: f.Line, Side: "RIGHT", Body: renderInline(f),
 			})
@@ -92,24 +103,25 @@ func (r *Reporter) Finish(ctx context.Context, res Result, packet *Packet) error
 	}
 
 	// Append out-of-diff findings (on unchanged lines of touched functions) to
-	// the summary with permalinks, since they can't be inline comments.
+	// the comment with permalinks, since they can't be inline comments — these
+	// are the only findings the compact comment spells out in full.
 	if len(outOfDiff) > 0 {
-		summary += "\n\n#### Findings outside the diff (unchanged lines)\n"
+		comment += "\n\n#### Findings outside the diff (unchanged lines)\n"
 		for _, f := range outOfDiff {
 			loc := f.File
 			if f.Line > 0 {
 				loc = fmt.Sprintf("[%s:%d](%s)", f.File, f.Line, r.gh.Permalink(r.headSHA, f.File, f.Line))
 			}
-			summary += fmt.Sprintf("- %s %s — %s (%s)\n", f.Severity, strings.ToLower(string(f.Verdict)), f.Summary, loc)
+			comment += fmt.Sprintf("- %s %s — %s (%s)\n", f.Severity, strings.ToLower(string(f.Verdict)), f.Summary, loc)
 		}
 	}
 
-	if _, err := r.gh.UpsertStickyComment(ctx, r.pr, r.stickyID, RenderFinal(summary)); err != nil {
+	if _, err := r.gh.UpsertStickyComment(ctx, r.pr, r.stickyID, RenderFinal(comment)); err != nil {
 		return fmt.Errorf("finalize sticky: %w", err)
 	}
 
 	conclusion, title := r.conclusion(res)
-	if err := r.gh.CompleteCheckRun(ctx, r.checkID, conclusion, title, summary); err != nil {
+	if err := r.gh.CompleteCheckRun(ctx, r.checkID, conclusion, title, checkSummary); err != nil {
 		return fmt.Errorf("complete check run: %w", err)
 	}
 	return nil
