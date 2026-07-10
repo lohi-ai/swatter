@@ -75,4 +75,4 @@ runs:
     SWATTER_PRICE_PER_MTOK_IN: ${{ inputs.price_per_mtok_in }}
     SWATTER_PRICE_PER_MTOK_OUT: ${{ inputs.price_per_mtok_out }}
     SWATTER_GITHUB_TOKEN: ${{ inputs.github_token }}
-    SWATTER_REPO_ROOT: ${{ github.workspace }}
+    SWATTER_REPO_ROOT: /github/workspace
