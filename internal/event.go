@@ -16,6 +16,10 @@ type GitHubEvent struct {
 		Number int    `json:"number"`
 		Title  string `json:"title"`
 		Body   string `json:"body"`
+		// Merged + MergeCommitSHA are set on the `closed` action and drive the
+		// post-merge feedback/learn flow (a closed-unmerged PR is skipped).
+		Merged         bool   `json:"merged"`
+		MergeCommitSHA string `json:"merge_commit_sha"`
 		Head   struct {
 			Ref string `json:"ref"`
 			SHA string `json:"sha"`
@@ -62,6 +66,12 @@ func LoadEvent(path string) (*GitHubEvent, error) {
 // rather than posting a failing check it can't attach comments to.
 func (e *GitHubEvent) IsFork() bool {
 	return e.PullRequest.Head.Repo.Fork
+}
+
+// IsMergedClose reports whether this event is a pull_request `closed` action
+// for a PR that actually merged — the trigger for the feedback/learn flow.
+func (e *GitHubEvent) IsMergedClose() bool {
+	return e.Action == "closed" && e.PullRequest.Merged
 }
 
 // PRNumber returns the pull-request number from either a pull_request or an

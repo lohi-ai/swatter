@@ -47,6 +47,17 @@ inputs:
     description: Optional output $/Mtok for a custom gateway model.
     required: false
     default: '0'
+  rules_commit:
+    description: >-
+      Post-merge learn flow only (pull_request `closed` + merged): commit the
+      updated .swatter/{rules,pending}.md to the base branch via the Contents
+      API (needs `contents: write`). 'false' computes and prints instead.
+    required: false
+    default: 'true'
+  rule_promote_after:
+    description: Observation weight a same-pattern cluster needs before it becomes a rule (missed-bug evidence weighs 2, repeats 1; always requires ≥2 distinct PRs).
+    required: false
+    default: '3'
   github_token:
     description: Token for posting the check run + comments. Defaults to the workflow GITHUB_TOKEN.
     required: false
@@ -74,5 +85,7 @@ runs:
     SWATTER_MAX_TOKENS_TOTAL: ${{ inputs.max_tokens_total }}
     SWATTER_PRICE_PER_MTOK_IN: ${{ inputs.price_per_mtok_in }}
     SWATTER_PRICE_PER_MTOK_OUT: ${{ inputs.price_per_mtok_out }}
+    SWATTER_RULES_COMMIT: ${{ inputs.rules_commit }}
+    SWATTER_RULE_PROMOTE_AFTER: ${{ inputs.rule_promote_after }}
     SWATTER_GITHUB_TOKEN: ${{ inputs.github_token }}
     SWATTER_REPO_ROOT: /github/workspace

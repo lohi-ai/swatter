@@ -63,18 +63,61 @@ The whole book (≤4 KB) is pasted verbatim into every finder brief, so enforcin
 learned rules costs no extra tokens per finding and the cost stays flat as the
 book turns over rather than grows.
 
+## Human feedback (post-merge learn flow)
+
+The lifecycle above scores rules with Swatter's own validator. The learn flow
+adds the human signal after a PR **merges** (`pull_request` `closed` event with
+`merged: true`):
+
+1. **Read-back.** Every inline comment Swatter posts embeds an invisible
+   marker (`<!-- swatter:finding {"rule_ids":[…],"summary":…} -->`). After the
+   merge, Swatter lists the PR's review comments (+ reactions), resolves
+   thread state via one GraphQL call, and classifies each of its threads:
+   - *explicit*: 👍/👎 reactions and replies ("fixed", "good catch" vs
+     "false positive", "not a bug"); net positive → **hit**, net negative →
+     **miss** for the finding's `rule_ids` (fed to the same Score step);
+   - *implicit* (tie-breaker only): a resolved thread or an outdated anchor
+     (the flagged line changed before merge) counts as a weak hit;
+   - silence is never a signal.
+2. **Gap evidence.** Two comment classes become *observations* in
+   `.swatter/pending.md` instead of rules:
+   - a positively-received Swatter finding **no rule produced** (`repeat`,
+     weight 1);
+   - a bug **another reviewer** (human or other bot) caught that Swatter
+     missed, when it was acted on — line changed, thread resolved, or an
+     affirming reply (`missed`, weight 2).
+   Observations age out after 120 days and the ledger is capped at 60 entries.
+3. **Conservative promotion.** One clustering pass groups same-pattern
+   observations (and discards nits/questions/chatter). A cluster becomes a
+   rule only when its harness-verified evidence reaches weight ≥ 3
+   (`SWATTER_RULE_PROMOTE_AFTER`) across **≥ 2 distinct PRs** — one noisy PR
+   can never mint a rule. Promoted rules start at confidence 0.7 (below
+   validator-learned rules) and pass the same dedup judge; spent observations
+   leave the ledger.
+
 ## Write-back
 
-Committing a rules file from CI races concurrent PRs on one path and can loop.
-Default is **suggestion mode**: the updated book is computed and offered (e.g. a
-PR comment / suggestion) for a human to merge. Direct commit is opt-in
-(`SWATTER_RULES_WRITE=1` for Swatter) and must use fetch-rebase-retry plus a
-`[skip ci]` marker. review-pr writes to `.babysit/review-pr.md` in the working
-tree only (never commits) — the babysit ticket flow owns the commit.
+**During a review** committing races concurrent PRs on one path, so the
+in-review lifecycle stays suggestion-mode by default (`SWATTER_RULES_WRITE=1`
+to force a working-tree write). **Post-merge** is the safe write point: the
+learn flow commits `.swatter/{rules,pending}.md` to the base branch through
+the GitHub **Contents API**, where every write carries the blob sha it read —
+a compare-and-swap. Two merges racing on the file leave the loser with a
+conflict; it refetches, re-applies its deltas onto the fresh content, and
+retries (≤3). Commit messages carry `[skip ci]` so the write never triggers
+another run. Opt out with `rules_commit: 'false'`. review-pr writes to
+`.babysit/review-pr.md` in the working tree only (never commits) — the babysit
+ticket flow owns the commit.
 
 ## Reference implementation
 
 `swatter/internal/rules.go` (deterministic core: parse/render, score,
-compact/expire) and `swatter/internal/rules_llm.go` (learn + dedup judge). Unit
-tests in `rules_test.go` cover round-trip, paraphrase dedup, scoring, path-gone
-expiry, and score-ranked compaction.
+compact/expire), `swatter/internal/rules_llm.go` (learn + dedup judge),
+`swatter/internal/feedback.go` (marker + feedback classification),
+`swatter/internal/observations.go` (pending ledger + promotion evidence),
+`swatter/internal/feedback_llm.go` (clustering/promotion),
+`swatter/internal/committer.go` + `learn.go` (CAS write-back + orchestration).
+Unit tests in `rules_test.go`, `feedback_test.go`, `observations_test.go`, and
+`committer_test.go` cover round-trip, paraphrase dedup, scoring, path-gone
+expiry, score-ranked compaction, feedback classification, promotion
+thresholds, and conflict-retry commits.

@@ -120,17 +120,19 @@ func renderWorkflow(provider, model, baseURL string) string {
 	if model != "" {
 		with += fmt.Sprintf("          model: %s\n", model)
 	}
+	// `closed` runs the post-merge feedback/learn flow (merged PRs only) and
+	// needs contents:write so the rule book can be committed to the base branch.
 	return `name: swatter
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, closed]
 
 concurrency:
   group: swatter-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
   checks: write
 

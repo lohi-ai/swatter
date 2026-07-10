@@ -1,0 +1,102 @@
+package internal
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestObsLedgerRoundTrip(t *testing.T) {
+	l := &ObsLedger{}
+	l.Add(Observation{Kind: ObsMissed, PR: 42, Date: "2026-07-11", Path: "db/tx.go",
+		Note: "advisory lock never released   on error: path\nsecond line dropped"})
+	l.Add(Observation{Kind: ObsRepeat, PR: 43, Date: "2026-07-11", Note: "SQL built by concat"})
+
+	got := ParseObsLedger(l.Render())
+	if len(got.Obs) != 2 {
+		t.Fatalf("round-trip lost entries: %+v", got.Obs)
+	}
+	o := got.Obs[0]
+	if o.Kind != ObsMissed || o.PR != 42 || o.Date != "2026-07-11" || o.Path != "db/tx.go" {
+		t.Fatalf("fields mangled: %+v", o)
+	}
+	// note survives colons, collapses runs of spaces (the 3-space field
+	// separator), and keeps only the first line.
+	if o.Note != "advisory lock never released on error: path" {
+		t.Fatalf("note = %q", o.Note)
+	}
+	if o.ID != "o-2026-07-11-1" || got.Obs[1].ID != "o-2026-07-11-2" {
+		t.Fatalf("ids = %q, %q", o.ID, got.Obs[1].ID)
+	}
+}
+
+func TestObsLedgerAddDedupsSamePR(t *testing.T) {
+	l := &ObsLedger{}
+	if !l.Add(Observation{Kind: ObsRepeat, PR: 1, Date: "2026-07-11", Note: "SQL built by concat"}) {
+		t.Fatal("first add rejected")
+	}
+	// Re-running the learn flow on the same PR must not double-record.
+	if l.Add(Observation{Kind: ObsRepeat, PR: 1, Date: "2026-07-11", Note: "SQL built by concat!"}) {
+		t.Fatal("same PR + note re-added")
+	}
+	// The same pattern on a different PR is the accumulating evidence we want.
+	if !l.Add(Observation{Kind: ObsRepeat, PR: 2, Date: "2026-07-12", Note: "SQL built by concat"}) {
+		t.Fatal("different PR rejected")
+	}
+}
+
+func TestObsLedgerPrune(t *testing.T) {
+	now := time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC)
+	l := &ObsLedger{}
+	l.Add(Observation{Kind: ObsRepeat, PR: 1, Date: "2026-01-01", Note: "ancient"}) // >120d
+	l.Add(Observation{Kind: ObsRepeat, PR: 2, Date: "2026-07-01", Note: "fresh"})
+	l.Prune(now)
+	if len(l.Obs) != 1 || l.Obs[0].Note != "fresh" {
+		t.Fatalf("age prune wrong: %+v", l.Obs)
+	}
+
+	l = &ObsLedger{}
+	for i := 0; i < obsMaxEntries+10; i++ {
+		l.Add(Observation{Kind: ObsRepeat, PR: i, Date: fmt.Sprintf("2026-07-%02d", i%28+1),
+			Note: fmt.Sprintf("pattern %d", i)})
+	}
+	l.Prune(now)
+	if len(l.Obs) != obsMaxEntries {
+		t.Fatalf("cap prune: %d entries, want %d", len(l.Obs), obsMaxEntries)
+	}
+}
+
+func TestClusterEvidence(t *testing.T) {
+	l := &ObsLedger{}
+	l.Add(Observation{Kind: ObsMissed, PR: 1, Date: "2026-07-11", Note: "lock leak on error"})
+	l.Add(Observation{Kind: ObsRepeat, PR: 2, Date: "2026-07-11", Note: "lock leak in retry"})
+	l.Add(Observation{Kind: ObsRepeat, PR: 2, Date: "2026-07-11", Note: "lock leak in shutdown"})
+
+	ids := []string{l.Obs[0].ID, l.Obs[1].ID, l.Obs[2].ID, "o-bogus-99"}
+	weight, prs, valid := l.ClusterEvidence(ids)
+	if weight != 4 { // missed(2) + repeat(1) + repeat(1); bogus id ignored
+		t.Fatalf("weight = %d, want 4", weight)
+	}
+	if prs != 2 {
+		t.Fatalf("distinct PRs = %d, want 2", prs)
+	}
+	if len(valid) != 3 {
+		t.Fatalf("valid = %v", valid)
+	}
+
+	l.Remove(valid)
+	if len(l.Obs) != 0 {
+		t.Fatalf("Remove left %+v", l.Obs)
+	}
+}
+
+func TestObsLedgerEmptyRender(t *testing.T) {
+	l := ParseObsLedger("")
+	if len(l.Obs) != 0 {
+		t.Fatalf("empty parse: %+v", l.Obs)
+	}
+	if !strings.Contains(l.Render(), "No pending observations") {
+		t.Fatalf("empty render: %q", l.Render())
+	}
+}

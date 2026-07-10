@@ -12,7 +12,8 @@ Settings → Secrets → Actions).
 name: swatter
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    # closed (merged) runs the post-merge feedback/learn flow, not a review
+    types: [opened, synchronize, reopened, closed]
 
 # Cancel a superseded (billed) review when a new commit is pushed.
 concurrency:
@@ -20,7 +21,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read       # read the checkout
+  contents: write      # read the checkout + commit .swatter/rules.md post-merge
   pull-requests: write # post comments
   checks: write        # post the check run
 
@@ -40,6 +41,29 @@ jobs:
 
 `fetch-depth: 0` is required — Swatter diffs `origin/<base>...HEAD`, which needs
 both refs present.
+
+## Post-merge learning (the feedback loop)
+
+With `closed` in the trigger list above, every **merged** PR runs `swatter`'s
+learn flow instead of a review (GitHub has no dedicated merge event — `closed`
+plus the payload's `merged: true` is the standard pattern; a close without
+merge is a no-op). The flow reads the feedback humans left on Swatter's inline
+comments — 👍/👎 reactions, replies like "good catch" or "false positive",
+resolved threads, and whether the flagged line was changed before merge — and:
+
+- scores the rule book: confirmed-useful findings are **hits**, findings
+  humans rejected are **misses** (noisy rules decay fast);
+- records evidence in `.swatter/pending.md`: valuable findings no rule
+  produced, and bugs *other* reviewers caught that Swatter missed;
+- promotes a pattern into `.swatter/rules.md` only when its evidence reaches
+  weight ≥ `rule_promote_after` (default 3; a missed bug weighs 2, a repeat 1)
+  **across at least 2 distinct PRs**;
+- commits both files to the base branch via the Contents API (sha
+  compare-and-swap, so concurrent merges can't clobber each other) with
+  `[skip ci]`. Requires `contents: write`; set `rules_commit: 'false'` to
+  compute without committing.
+
+Backfill an already-merged PR from a checkout: `swatter learn --pr 42`.
 
 ## Bring-your-own gateway (9router / OpenRouter / LiteLLM / Ollama)
 

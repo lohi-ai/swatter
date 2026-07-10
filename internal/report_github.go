@@ -160,6 +160,11 @@ func (r *Reporter) conclusion(res Result) (conclusion, title string) {
 
 func renderInline(f Finding) string {
 	var b strings.Builder
+	// Invisible marker first: the post-merge feedback pass identifies swatter's
+	// comments by it and maps reactions/replies back to the finding's rules.
+	if m := renderFindingMarker(f); m != "" {
+		b.WriteString(m + "\n")
+	}
 	fmt.Fprintf(&b, "**🤚 %s %s** — %s\n\n", f.Severity, strings.ToLower(string(f.Verdict)), f.Summary)
 	if f.FailureScenario != "" {
 		fmt.Fprintf(&b, "*Scenario:* %s\n\n", f.FailureScenario)
