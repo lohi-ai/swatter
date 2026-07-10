@@ -41,6 +41,13 @@ func (r Rule) score(now time.Time) float64 {
 // RuleStore is the parsed book plus its lifecycle operations.
 type RuleStore struct {
 	Rules []Rule
+	// ScoredPRs records the PRs whose post-merge human feedback has already been
+	// folded into rule scores. The learn flow re-derives the same hit/miss ids
+	// from a PR's comments on every run, so without this a re-run workflow — or a
+	// retry after the rules commit succeeds but the pending commit fails — would
+	// apply one human 👍/👎 to a rule's confidence twice. Persisted as a marker
+	// line in the rendered book so the guard survives across stateless CI runs.
+	ScoredPRs []int
 }
 
 // Lifecycle thresholds (plan §Rule book).
@@ -48,6 +55,9 @@ const (
 	ruleBookMaxBytes    = 4096 // compact when the rendered book exceeds this
 	compactEveryReviews = 20   // …or every N reviews regardless of size
 	evictScoreFloor     = 0.15 // a rule below this effective score is evictable
+
+	scoredPRsMarker = "<!-- swatter:scored-prs " // book header line: PRs already scored
+	scoredPRsCap    = 200                        // keep only the most-recent PRs' guard
 )
 
 // ParseRuleStore reads the markdown book. Unknown lines are ignored so a
@@ -63,6 +73,11 @@ func ParseRuleStore(md string) *RuleStore {
 	}
 	for _, raw := range strings.Split(md, "\n") {
 		line := strings.TrimSpace(raw)
+		if rest, ok := strings.CutPrefix(line, scoredPRsMarker); ok {
+			flush()
+			rs.ScoredPRs = parseIntList(strings.TrimSuffix(strings.TrimSpace(rest), "-->"))
+			continue
+		}
 		if strings.HasPrefix(line, "- id:") {
 			flush()
 			cur = &Rule{ID: strings.TrimSpace(strings.TrimPrefix(line, "- id:")), Confidence: 0.8}
@@ -102,12 +117,19 @@ func ParseRuleStore(md string) *RuleStore {
 
 // Render serializes the book back to markdown in the canonical entry format.
 func (rs *RuleStore) Render() string {
-	if len(rs.Rules) == 0 {
+	if len(rs.Rules) == 0 && len(rs.ScoredPRs) == 0 {
 		return "# Swatter rule book\n\n_No rules learned yet._\n"
 	}
 	var b strings.Builder
 	b.WriteString("# Swatter rule book\n\n")
 	b.WriteString("<!-- Managed by Swatter: learned from confirmed findings, scored, and compacted. Hand-edits are preserved but may be re-scored. -->\n\n")
+	if len(rs.ScoredPRs) > 0 {
+		fmt.Fprintf(&b, "%s%s -->\n\n", scoredPRsMarker, joinInts(rs.ScoredPRs))
+	}
+	if len(rs.Rules) == 0 {
+		b.WriteString("_No rules learned yet._\n")
+		return b.String()
+	}
 	for _, r := range rs.Rules {
 		fmt.Fprintf(&b, "- id: %s\n", r.ID)
 		fmt.Fprintf(&b, "  rule: %s\n", r.Rule)
@@ -181,6 +203,33 @@ func (rs *RuleStore) Score(hits, misses []string, now time.Time) {
 	}
 }
 
+// HasScored reports whether this PR's post-merge feedback has already been
+// folded into rule scores.
+func (rs *RuleStore) HasScored(pr int) bool {
+	for _, p := range rs.ScoredPRs {
+		if p == pr {
+			return true
+		}
+	}
+	return false
+}
+
+// MarkScored records that this PR's feedback has been scored and returns true
+// when it was not already recorded — i.e. scoring should proceed. Callers gate
+// Score on this so a re-run never double-counts a human signal. The list stays
+// sorted and capped at the most-recent scoredPRsCap PRs.
+func (rs *RuleStore) MarkScored(pr int) bool {
+	if rs.HasScored(pr) {
+		return false
+	}
+	rs.ScoredPRs = append(rs.ScoredPRs, pr)
+	sort.Ints(rs.ScoredPRs)
+	if len(rs.ScoredPRs) > scoredPRsCap {
+		rs.ScoredPRs = rs.ScoredPRs[len(rs.ScoredPRs)-scoredPRsCap:]
+	}
+	return true
+}
+
 // Expire removes rules whose subject left the repo (path-gone → immediate) and,
 // when over the size/age budget, evicts the lowest-scoring rules until the book
 // fits. pathExists reports whether a rule's cited path is still present.
@@ -244,6 +293,24 @@ func normalizeRule(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func parseIntList(s string) []int {
+	var out []int
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if n, err := strconv.Atoi(f); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+func joinInts(ns []int) string {
+	parts := make([]string, len(ns))
+	for i, n := range ns {
+		parts[i] = strconv.Itoa(n)
+	}
+	return strings.Join(parts, ",")
 }
 
 func toSet(ss []string) map[string]bool {

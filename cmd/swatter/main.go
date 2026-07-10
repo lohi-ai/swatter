@@ -21,6 +21,8 @@ func main() {
 	switch os.Args[1] {
 	case "run":
 		os.Exit(cmdRun(os.Args[2:]))
+	case "learn":
+		os.Exit(cmdLearn(os.Args[2:]))
 	case "init":
 		os.Exit(internal.CmdInit(os.Args[2:]))
 	case "-h", "--help", "help":
@@ -37,8 +39,13 @@ func usage() {
 	fmt.Fprint(os.Stderr, `swatter — PR-review bugbot on agentcore
 
 Usage:
-  swatter run  [flags]   Review a PR / branch and report findings
-  swatter init [flags]   Scaffold the GitHub workflow + set the API-key secret
+  swatter run   [flags]  Review a PR / branch and report findings
+                         (on a merged pull_request "closed" event this runs
+                         the post-merge feedback/learn flow instead)
+  swatter learn [flags]  Learn from a merged PR's feedback: score rules from
+                         reactions/replies/resolutions, record gap evidence,
+                         promote repeated patterns, commit the rule book
+  swatter init  [flags]  Scaffold the GitHub workflow + set the API-key secret
 
 Run flags:
   --github-event PATH  webhook payload (default: $GITHUB_EVENT_PATH)
@@ -46,6 +53,12 @@ Run flags:
   --base REF           base ref to diff against (default: from event or origin/main)
   --head REF           head ref (default: HEAD)
   --format json|text   stdout format (default: text)
+
+Learn flags:
+  --github-event PATH  webhook payload (default: $GITHUB_EVENT_PATH)
+  --repo-root PATH     checkout root (default: $SWATTER_REPO_ROOT or .)
+  --pr N               PR number (default: from event; required without one)
+  --branch NAME        base branch the book is committed to (default: from event or main)
 
 Config is read from SWATTER_* env (SWATTER_API_KEY required). See README.
 `)
@@ -84,6 +97,16 @@ func cmdRun(args []string) int {
 	}
 
 	ctx := context.Background()
+
+	// A pull_request `closed` event is not a review trigger: when the PR merged
+	// it runs the feedback/learn flow; a close-without-merge is a no-op.
+	if event != nil && event.Action == "closed" {
+		if !event.IsMergedClose() {
+			fmt.Fprintln(os.Stderr, "swatter: PR closed without merging — nothing to learn.")
+			return 0
+		}
+		return runLearnFlow(ctx, cfg, event.PRNumber(), event.PullRequest.Base.Ref)
+	}
 
 	// Set up GitHub reporting when a token + PR are available; otherwise the
 	// progress notes and results go to stdout/stderr only.
@@ -126,6 +149,71 @@ func cmdRun(args []string) int {
 		return 0
 	}
 	return internal.ExitCode(cfg, res)
+}
+
+// cmdLearn runs the feedback/learn flow directly (outside the run dispatch) —
+// for backfilling a merged PR by number, or from a `closed` event payload.
+func cmdLearn(args []string) int {
+	fs := flag.NewFlagSet("learn", flag.ContinueOnError)
+	eventPath := fs.String("github-event", os.Getenv("GITHUB_EVENT_PATH"), "webhook payload path")
+	repoRoot := fs.String("repo-root", "", "checkout root")
+	pr := fs.Int("pr", 0, "PR number (default: from event)")
+	branch := fs.String("branch", "", "base branch (default: from event or main)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	cfg, err := internal.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "swatter: config: %v\n", err)
+		return 2
+	}
+	if *repoRoot != "" {
+		cfg.RepoRoot = *repoRoot
+	}
+
+	if *eventPath != "" && (*pr == 0 || *branch == "") {
+		if event, err := internal.LoadEvent(*eventPath); err == nil {
+			if *pr == 0 {
+				*pr = event.PRNumber()
+			}
+			if *branch == "" {
+				*branch = event.PullRequest.Base.Ref
+			}
+		}
+	}
+	if *pr == 0 {
+		fmt.Fprintln(os.Stderr, "swatter learn: no PR number (pass --pr or --github-event)")
+		return 2
+	}
+	if *branch == "" {
+		*branch = "main"
+	}
+	return runLearnFlow(context.Background(), cfg, *pr, *branch)
+}
+
+// runLearnFlow is the shared learn entrypoint for `run` (closed event) and
+// `learn`. It needs a GitHub token — reading feedback and committing the book
+// are both API operations.
+func runLearnFlow(ctx context.Context, cfg internal.Config, pr int, branch string) int {
+	gh, err := internal.NewGitHubClientFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "swatter learn: github client: %v\n", err)
+		return 2
+	}
+	if gh == nil {
+		fmt.Fprintln(os.Stderr, "swatter learn: no GITHUB_TOKEN — cannot read PR feedback.")
+		return 2
+	}
+	progress := func(note string) { fmt.Fprintf(os.Stderr, "swatter learn: %s\n", note) }
+	sum, err := internal.RunFeedback(ctx, cfg, gh, pr, branch, progress)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "swatter learn: %v\n", err)
+		return 1
+	}
+	fmt.Printf("swatter learn: PR #%d — %d comment(s), %d signal(s): %d hit / %d miss, +%d observation(s), %d rule(s) promoted, committed %v\n",
+		pr, sum.SwatterComments, sum.Signals, sum.Hits, sum.Misses, sum.ObsAdded, sum.RulesPromoted, sum.Committed)
+	return 0
 }
 
 // setupReporter builds a GitHub reporter when a token + PR number are present.

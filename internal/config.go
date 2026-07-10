@@ -53,6 +53,19 @@ type Config struct {
 
 	// RepoRoot is the checkout the read-only toolset is rooted at.
 	RepoRoot string
+
+	// Feedback/learn flow (post-merge). PromoteAfter is the observation weight a
+	// same-pattern cluster must accumulate before it becomes a rule (a missed-bug
+	// observation weighs 2, a repeat-finding 1). RulesCommit gates the post-merge
+	// Contents-API commit of .swatter/{rules,pending}.md to the base branch.
+	PromoteAfter int
+	RulesCommit  bool
+
+	// BotLogin is the GitHub account Swatter's own comments are authored by (the
+	// default Actions token posts as github-actions[bot]). The feedback pass only
+	// trusts a finding marker on a comment from this author, so a PR participant
+	// can't forge feedback by pasting the marker into their own comment.
+	BotLogin string
 }
 
 // LoadConfig resolves a Config from the SWATTER_* environment the Action sets.
@@ -71,6 +84,9 @@ func LoadConfig() (Config, error) {
 		PricePerMTokOut: envFloat("SWATTER_PRICE_PER_MTOK_OUT", 0),
 		FailOn:         FailOn(envDefault("SWATTER_FAIL_ON", string(FailOnNever))),
 		RepoRoot:       envDefault("SWATTER_REPO_ROOT", "."),
+		PromoteAfter:   envInt("SWATTER_RULE_PROMOTE_AFTER", 3),
+		RulesCommit:    envBool("SWATTER_RULES_COMMIT", true),
+		BotLogin:       envDefault("SWATTER_BOT_LOGIN", "github-actions[bot]"),
 	}
 
 	// A strong model is mandatory. If SWATTER_MODEL is unset, fall back to a
@@ -150,6 +166,17 @@ func envFloat(key string, def float64) float64 {
 		}
 	}
 	return def
+}
+
+func envBool(key string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
 }
 
 func envInt(key string, def int) int {

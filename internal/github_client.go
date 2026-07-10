@@ -3,10 +3,12 @@ package internal
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -17,12 +19,12 @@ import (
 // The harness owns the token — the review agents never see it — so an injected
 // PR instruction can never drive a GitHub write.
 type GitHubClient struct {
-	token   string
-	apiURL  string // e.g. https://api.github.com
-	srvURL  string // e.g. https://github.com (for permalinks)
-	owner   string
-	repo    string
-	http    *http.Client
+	token  string
+	apiURL string // e.g. https://api.github.com
+	srvURL string // e.g. https://github.com (for permalinks)
+	owner  string
+	repo   string
+	http   *http.Client
 }
 
 // NewGitHubClientFromEnv builds a client from the Actions environment
@@ -58,17 +60,24 @@ func (c *GitHubClient) Permalink(sha, path string, line int) string {
 }
 
 func (c *GitHubClient) do(ctx context.Context, method, path string, body any, out any) error {
+	_, err := c.doStatus(ctx, method, path, body, out)
+	return err
+}
+
+// doStatus is do plus the HTTP status code, for callers that must distinguish
+// specific failures (404 = absent file, 409/422 = contents sha conflict).
+func (c *GitHubClient) doStatus(ctx context.Context, method, path string, body any, out any) (int, error) {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		rdr = bytes.NewReader(b)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.apiURL+path, rdr)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Accept", "application/vnd.github+json")
@@ -78,17 +87,17 @@ func (c *GitHubClient) do(ctx context.Context, method, path string, body any, ou
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("github %s %s: %d: %s", method, path, resp.StatusCode, truncate(string(data), 400))
+		return resp.StatusCode, fmt.Errorf("github %s %s: %d: %s", method, path, resp.StatusCode, truncate(string(data), 400))
 	}
 	if out != nil && len(data) > 0 {
-		return json.Unmarshal(data, out)
+		return resp.StatusCode, json.Unmarshal(data, out)
 	}
-	return nil
+	return resp.StatusCode, nil
 }
 
 // --- check runs ---
@@ -184,6 +193,162 @@ type reviewReq struct {
 func (c *GitHubClient) CreateReview(ctx context.Context, pr int, commitID, body string, comments []reviewComment) error {
 	return c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/%s/pulls/%d/reviews", c.owner, c.repo, pr),
 		reviewReq{CommitID: commitID, Body: body, Event: "COMMENT", Comments: comments}, nil)
+}
+
+// --- post-merge feedback read-back ---
+
+// ReviewCommentData is the subset of a pull-request review comment the
+// feedback pass needs: identity, threading, anchor, reactions, and whether the
+// commented line was changed by a later commit (Position == nil → "outdated",
+// GitHub's signal that the flagged code moved or was rewritten before merge).
+type ReviewCommentData struct {
+	ID          int64  `json:"id"`
+	InReplyToID int64  `json:"in_reply_to_id"`
+	Body        string `json:"body"`
+	Path        string `json:"path"`
+	Line        int    `json:"line"`
+	Position    *int   `json:"position"`
+	User        struct {
+		Login string `json:"login"`
+		Type  string `json:"type"` // "User" | "Bot"
+	} `json:"user"`
+	Reactions struct {
+		Up   int `json:"+1"`
+		Down int `json:"-1"`
+	} `json:"reactions"`
+}
+
+// Outdated reports whether the commented line was changed by a later commit.
+func (rc ReviewCommentData) Outdated() bool { return rc.Position == nil }
+
+// ListReviewComments fetches every inline review comment on a PR, following
+// pagination to the end so feedback on a very large PR is never truncated.
+func (c *GitHubClient) ListReviewComments(ctx context.Context, pr int) ([]ReviewCommentData, error) {
+	var all []ReviewCommentData
+	for page := 1; ; page++ {
+		var batch []ReviewCommentData
+		err := c.do(ctx, http.MethodGet,
+			fmt.Sprintf("/repos/%s/%s/pulls/%d/comments?per_page=100&page=%d", c.owner, c.repo, pr, page), nil, &batch)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, batch...)
+		if len(batch) < 100 {
+			break // last (short) page — a full page means there may be more
+		}
+	}
+	return all, nil
+}
+
+// ThreadResolution returns, per review-comment id, whether its review thread
+// was resolved. Thread resolution is not exposed over REST, so this is the one
+// GraphQL call swatter makes. It follows the reviewThreads cursor to the end so
+// resolutions on a PR with many threads aren't silently dropped. Best-effort:
+// callers treat an error as "no resolution data" rather than failing the pass.
+func (c *GitHubClient) ThreadResolution(ctx context.Context, pr int) (map[int64]bool, error) {
+	const q = `query($owner:String!,$repo:String!,$pr:Int!,$cursor:String){
+  repository(owner:$owner,name:$repo){ pullRequest(number:$pr){
+    reviewThreads(first:100, after:$cursor){
+      pageInfo{ hasNextPage endCursor }
+      nodes{ isResolved comments(first:50){ nodes{ databaseId } } }
+    }
+  } } }`
+	out := map[int64]bool{}
+	var cursor *string
+	for {
+		body := map[string]any{
+			"query":     q,
+			"variables": map[string]any{"owner": c.owner, "repo": c.repo, "pr": pr, "cursor": cursor},
+		}
+		var res struct {
+			Data struct {
+				Repository struct {
+					PullRequest struct {
+						ReviewThreads struct {
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+							Nodes []struct {
+								IsResolved bool `json:"isResolved"`
+								Comments   struct {
+									Nodes []struct {
+										DatabaseID int64 `json:"databaseId"`
+									} `json:"nodes"`
+								} `json:"comments"`
+							} `json:"nodes"`
+						} `json:"reviewThreads"`
+					} `json:"pullRequest"`
+				} `json:"repository"`
+			} `json:"data"`
+		}
+		if err := c.do(ctx, http.MethodPost, "/graphql", body, &res); err != nil {
+			return nil, err
+		}
+		threads := res.Data.Repository.PullRequest.ReviewThreads
+		for _, th := range threads.Nodes {
+			for _, cm := range th.Comments.Nodes {
+				out[cm.DatabaseID] = th.IsResolved
+			}
+		}
+		if !threads.PageInfo.HasNextPage || threads.PageInfo.EndCursor == "" {
+			break
+		}
+		end := threads.PageInfo.EndCursor
+		cursor = &end
+	}
+	return out, nil
+}
+
+// --- repository contents (the rule-book committer) ---
+
+// ErrContentConflict marks a compare-and-swap failure on PutContent: the file
+// changed on the branch between Get and Put. The committer refetches, re-applies
+// its mutation, and retries.
+var ErrContentConflict = fmt.Errorf("github contents: sha conflict")
+
+// GetContent reads a file from a branch via the Contents API. found=false (with
+// nil error) when the file does not exist yet.
+func (c *GitHubClient) GetContent(ctx context.Context, path, ref string) (content, sha string, found bool, err error) {
+	var res struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+		SHA      string `json:"sha"`
+	}
+	status, err := c.doStatus(ctx, http.MethodGet,
+		fmt.Sprintf("/repos/%s/%s/contents/%s?ref=%s", c.owner, c.repo, path, url.QueryEscape(ref)), nil, &res)
+	if err != nil {
+		if status == http.StatusNotFound {
+			return "", "", false, nil
+		}
+		return "", "", false, err
+	}
+	raw, decErr := base64.StdEncoding.DecodeString(strings.ReplaceAll(res.Content, "\n", ""))
+	if decErr != nil {
+		return "", "", false, fmt.Errorf("decode %s: %w", path, decErr)
+	}
+	return string(raw), res.SHA, true, nil
+}
+
+// PutContent creates or updates a file on a branch. sha is the blob sha from
+// GetContent ("" for a new file) — GitHub rejects a stale sha, which is the
+// compare-and-swap that makes the post-merge commit safe against a concurrent
+// merge racing on the same file (returned as ErrContentConflict).
+func (c *GitHubClient) PutContent(ctx context.Context, path, branch, message, content, sha string) error {
+	body := map[string]any{
+		"message": message,
+		"content": base64.StdEncoding.EncodeToString([]byte(content)),
+		"branch":  branch,
+	}
+	if sha != "" {
+		body["sha"] = sha
+	}
+	status, err := c.doStatus(ctx, http.MethodPut,
+		fmt.Sprintf("/repos/%s/%s/contents/%s", c.owner, c.repo, path), body, nil)
+	if err != nil && (status == http.StatusConflict || status == http.StatusUnprocessableEntity) {
+		return fmt.Errorf("%w: %s (%v)", ErrContentConflict, path, err)
+	}
+	return err
 }
 
 func firstEnv(keys ...string) string {

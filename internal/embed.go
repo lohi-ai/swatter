@@ -26,6 +26,10 @@ func ValidatorPrompt() string { return mustSkill("validator.md") }
 // LearnPrompt is the Soul for the rule-learning run.
 func LearnPrompt() string { return mustSkill("learn.md") }
 
+// FeedbackClusterPrompt is the Soul for the post-merge observation-clustering
+// run that proposes rules from accumulated feedback evidence.
+func FeedbackClusterPrompt() string { return mustSkill("feedback_cluster.md") }
+
 // AngleCharter returns the charter markdown for a finder angle letter (A–H),
 // used as the AgentDefinition.Agents slot. Unknown letters return "".
 func AngleCharter(letter string) string {
