@@ -23,4 +23,6 @@ jobs:
         uses: lohi-ai/swatter@v0
         with:
           api_key: ${{ secrets.SWATTER_API_KEY }}
-          model: claude-opus-4-8
+          provider: openai-compat
+          base_url: https://ai.lohi2.com/v1
+          model: pro
