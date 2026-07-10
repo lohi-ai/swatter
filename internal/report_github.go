@@ -1,0 +1,153 @@
+package internal
+
+import (
+	"context"
+	"fmt"
+	"strings"
+)
+
+// Reporter posts a review to GitHub: an in-progress check run + sticky
+// live-progress comment up front, then inline review comments, a final summary
+// comment, and the check-run conclusion. All writes go through the harness's
+// token; the review agents never hold it.
+type Reporter struct {
+	gh       *GitHubClient
+	cfg      Config
+	pr       int
+	headSHA  string
+	checkID  int64
+	stickyID int64
+	tracker  *ProgressTracker
+}
+
+// NewReporter builds a reporter for a PR. gh may be nil (no token) → the caller
+// falls back to stdout.
+func NewReporter(gh *GitHubClient, cfg Config, pr int, headSHA string) *Reporter {
+	return &Reporter{gh: gh, cfg: cfg, pr: pr, headSHA: headSHA, tracker: &ProgressTracker{}}
+}
+
+// Start opens the check run and the sticky comment (found-and-reused if a prior
+// run left one). Safe to call when gh is nil (no-op).
+func (r *Reporter) Start(ctx context.Context) error {
+	if r.gh == nil {
+		return nil
+	}
+	id, err := r.gh.CreateCheckRun(ctx, r.headSHA)
+	if err != nil {
+		return fmt.Errorf("create check run: %w", err)
+	}
+	r.checkID = id
+	existing, err := r.gh.FindStickyComment(ctx, r.pr, StickyMarker)
+	if err != nil {
+		return fmt.Errorf("find sticky: %w", err)
+	}
+	r.stickyID = existing
+	sid, err := r.gh.UpsertStickyComment(ctx, r.pr, r.stickyID, r.tracker.RenderLive())
+	if err != nil {
+		return fmt.Errorf("open sticky: %w", err)
+	}
+	r.stickyID = sid
+	return nil
+}
+
+// Progress is the ProgressFn handed to the pipeline: it records the note and
+// refreshes the sticky comment. Failures to update are non-fatal (best effort).
+func (r *Reporter) Progress(note string) {
+	r.tracker.Note(note)
+	if r.gh == nil || r.stickyID == 0 {
+		return
+	}
+	_, _ = r.gh.UpsertStickyComment(context.Background(), r.pr, r.stickyID, r.tracker.RenderLive())
+}
+
+// Finish posts the inline comments, the final summary, and completes the check
+// run. packet supplies the diff for line-mapping.
+func (r *Reporter) Finish(ctx context.Context, res Result, packet *Packet) error {
+	summary := RenderMarkdown(res, r.cfg)
+	if r.gh == nil {
+		return nil
+	}
+
+	// Split findings into in-diff (inline comments) and out-of-diff (summary).
+	dm := BuildDiffMap(packet.Diff)
+	var inline []reviewComment
+	var outOfDiff []Finding
+	for _, f := range res.Findings {
+		if f.Line > 0 && dm.Commentable(f.File, f.Line) {
+			inline = append(inline, reviewComment{
+				Path: f.File, Line: f.Line, Side: "RIGHT", Body: renderInline(f),
+			})
+		} else {
+			outOfDiff = append(outOfDiff, f)
+		}
+	}
+
+	if len(inline) > 0 {
+		body := fmt.Sprintf("🪰 Swatter posted %d inline comment(s). Full summary below.", len(inline))
+		if err := r.gh.CreateReview(ctx, r.pr, r.headSHA, body, inline); err != nil {
+			// Non-fatal: fall through to the summary comment, which carries
+			// every finding anyway.
+			r.Progress(fmt.Sprintf("inline review failed (%v) — findings are in the summary", err))
+		}
+	}
+
+	// Append out-of-diff findings (on unchanged lines of touched functions) to
+	// the summary with permalinks, since they can't be inline comments.
+	if len(outOfDiff) > 0 {
+		summary += "\n\n#### Findings outside the diff (unchanged lines)\n"
+		for _, f := range outOfDiff {
+			loc := f.File
+			if f.Line > 0 {
+				loc = fmt.Sprintf("[%s:%d](%s)", f.File, f.Line, r.gh.Permalink(r.headSHA, f.File, f.Line))
+			}
+			summary += fmt.Sprintf("- %s %s — %s (%s)\n", f.Severity, strings.ToLower(string(f.Verdict)), f.Summary, loc)
+		}
+	}
+
+	if _, err := r.gh.UpsertStickyComment(ctx, r.pr, r.stickyID, RenderFinal(summary)); err != nil {
+		return fmt.Errorf("finalize sticky: %w", err)
+	}
+
+	conclusion, title := r.conclusion(res)
+	if err := r.gh.CompleteCheckRun(ctx, r.checkID, conclusion, title, summary); err != nil {
+		return fmt.Errorf("complete check run: %w", err)
+	}
+	return nil
+}
+
+// conclusion maps findings to a check-run conclusion under fail_on. Only
+// CONFIRMED findings can turn it red; PLAUSIBLE is advisory (neutral).
+func (r *Reporter) conclusion(res Result) (conclusion, title string) {
+	worstFail := false
+	confirmed, total := 0, len(res.Findings)
+	for _, f := range res.Findings {
+		if f.Verdict == VerdictConfirmed {
+			confirmed++
+			if r.cfg.Fails(f.Severity) {
+				worstFail = true
+			}
+		}
+	}
+	switch {
+	case res.TrivialPass != "":
+		return "success", "No review needed — " + res.TrivialPass
+	case worstFail:
+		return "failure", fmt.Sprintf("%d finding(s), %d confirmed", total, confirmed)
+	case total > 0:
+		return "neutral", fmt.Sprintf("%d finding(s), %d confirmed (below fail threshold)", total, confirmed)
+	default:
+		return "success", "No findings"
+	}
+}
+
+func renderInline(f Finding) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "**🪰 %s %s** — %s\n\n", f.Severity, strings.ToLower(string(f.Verdict)), f.Summary)
+	if f.FailureScenario != "" {
+		fmt.Fprintf(&b, "*Scenario:* %s\n\n", f.FailureScenario)
+	}
+	if f.Rationale != "" {
+		fmt.Fprintf(&b, "*Validator:* %s\n", f.Rationale)
+	}
+	return b.String()
+}

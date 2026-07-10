@@ -1,0 +1,78 @@
+name: Swatter
+description: >-
+  PR-review bugbot — validated findings + a living rule book, on agentcore.
+  BYOK: bring an Anthropic key or point at any OpenAI-compatible gateway.
+author: lohi-ai
+branding:
+  icon: alert-triangle
+  color: red
+
+inputs:
+  api_key:
+    description: BYOK inference key (Anthropic key, or the gateway key for openai-compat). Store as a secret.
+    required: true
+  provider:
+    description: 'anthropic (default) | openai-compat'
+    required: false
+    default: anthropic
+  base_url:
+    description: OpenAI-compatible gateway base URL (required for provider openai-compat — 9router, OpenRouter, LiteLLM, Ollama, …).
+    required: false
+    default: ''
+  model:
+    description: Strong model id for bug/security angles and large diffs.
+    required: false
+    default: ''
+  model_cheap:
+    description: Cheaper model id used for cleanup/conformance angles on small diffs. Defaults to `model`.
+    required: false
+    default: ''
+  fail_on:
+    description: 'Check-run red threshold: critical | major (default) | any | never.'
+    required: false
+    default: major
+  max_usd:
+    description: Per-PR spend ceiling (uses agentcore pricing for known models).
+    required: false
+    default: '5'
+  max_tokens_total:
+    description: Per-PR token ceiling — the always-works backstop for unknown-priced gateway models.
+    required: false
+    default: '8000000'
+  price_per_mtok_in:
+    description: Optional input $/Mtok for a custom gateway model so max_usd meters it too.
+    required: false
+    default: '0'
+  price_per_mtok_out:
+    description: Optional output $/Mtok for a custom gateway model.
+    required: false
+    default: '0'
+  github_token:
+    description: Token for posting the check run + comments. Defaults to the workflow GITHUB_TOKEN.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  findings:
+    description: JSON array of validated findings.
+  finding_count:
+    description: Number of findings reported.
+
+runs:
+  using: docker
+  image: docker://ghcr.io/lohi-ai/swatter:v0
+  args:
+    - run
+  env:
+    SWATTER_API_KEY: ${{ inputs.api_key }}
+    SWATTER_PROVIDER: ${{ inputs.provider }}
+    SWATTER_BASE_URL: ${{ inputs.base_url }}
+    SWATTER_MODEL: ${{ inputs.model }}
+    SWATTER_MODEL_CHEAP: ${{ inputs.model_cheap }}
+    SWATTER_FAIL_ON: ${{ inputs.fail_on }}
+    SWATTER_MAX_USD: ${{ inputs.max_usd }}
+    SWATTER_MAX_TOKENS_TOTAL: ${{ inputs.max_tokens_total }}
+    SWATTER_PRICE_PER_MTOK_IN: ${{ inputs.price_per_mtok_in }}
+    SWATTER_PRICE_PER_MTOK_OUT: ${{ inputs.price_per_mtok_out }}
+    SWATTER_GITHUB_TOKEN: ${{ inputs.github_token }}
+    SWATTER_REPO_ROOT: ${{ github.workspace }}

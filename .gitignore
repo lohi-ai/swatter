@@ -1,0 +1,6 @@
+swatter
+/out/
+*.test
+cookies.txt
+.env
+.DS_Store
