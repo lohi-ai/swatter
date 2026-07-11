@@ -134,6 +134,24 @@ func TestApplySynthesis_Unparseable(t *testing.T) {
 	}
 }
 
+// TestApplySynthesis_OmittedIndicesSurvive guards the recall fix from the PR
+// review: a synthesis reply that decodes but mentions only some indices must
+// not drop the rest — they are appended in rank order.
+func TestApplySynthesis_OmittedIndicesSurvive(t *testing.T) {
+	ranked := []Finding{
+		{Candidate: Candidate{File: "a.go", Line: 1, Summary: "one"}, Verdict: VerdictConfirmed},
+		{Candidate: Candidate{File: "b.go", Line: 2, Summary: "two"}, Verdict: VerdictConfirmed},
+		{Candidate: Candidate{File: "c.go", Line: 3, Summary: "three"}, Verdict: VerdictPlausible},
+	}
+	out := applySynthesis(`{"findings":[{"primary":0}]}`, ranked)
+	if len(out) != 3 {
+		t.Fatalf("want all 3 findings (1 mentioned + 2 appended), got %d: %+v", len(out), out)
+	}
+	if out[1].Summary != "two" || out[2].Summary != "three" {
+		t.Fatalf("omitted findings must survive in rank order, got %+v", out)
+	}
+}
+
 func TestBudgetLedger_TokenBackstopFires(t *testing.T) {
 	// Unknown gateway model prices $0; the token backstop must still fire.
 	cfg := Config{MaxUSD: 100, MaxTokensTotal: 1000}
