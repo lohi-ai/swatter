@@ -86,8 +86,7 @@ func (d *runnerDeps) BriefReview(ctx context.Context, packet *Packet, findings [
 	}
 	fj, _ := json.Marshal(slim)
 
-	limits := agentcore.Limits{MaxTurns: 1, MaxToolCalls: 0, MaxToolResultLen: 2_000, MaxContextTokens: 120_000}
-	ag, err := d.roleAgent(d.cfg.ModelStrong, BriefingPrompt(), "", limits)
+	ag, err := d.roleAgent(d.cfg.ModelStrong, BriefingPrompt(), "", d.cfg.EffortProfile().Limits.Briefing)
 	if err != nil {
 		return nil, err
 	}

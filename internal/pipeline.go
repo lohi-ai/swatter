@@ -10,16 +10,14 @@ import (
 	"github.com/lohi-ai/agentray/agentcore"
 )
 
-// Review profile — the reference's xhigh/max fan-out, run once per PR (Swatter
-// does one thorough pass, not a level-selectable review). Five correctness
-// angles A–E one agent each, plus one cleanup agent covering all five cleanup
-// lenses at a cap of cleanupLenses×perAngle so its budget matches five inline
-// agents while cutting four runs. Sweep always follows; the report caps at
-// maxFindings.
+// The review's shape (which correctness angles run, per-angle candidate caps,
+// whether verify/sweep run, the findings cap) comes from the effort level's
+// EffortProfile — the reference level table. Two shape constants are level-
+// independent: the cleanup agent covers all five cleanup lenses at a cap of
+// cleanupLenses×PerAngle so its budget matches five inline agents while
+// cutting four runs, and the sweep surfaces at most sweepMax new candidates.
 const (
-	perAngle      = 8
 	cleanupLenses = 5
-	maxFindings   = 15
 	sweepMax      = 8
 )
 
@@ -76,10 +74,12 @@ func NewPipeline(cfg Config, packet *Packet, budget *Budget, progress ProgressFn
 	return &Pipeline{cfg: cfg, deps: deps, packet: packet, progress: progress}, nil
 }
 
-// Run executes the reference pipeline: Scope → Find → group-by-location Verify →
-// Sweep → Synthesize, and returns the ranked, capped findings.
+// Run executes the level-shaped reference pipeline — up to Scope → Find →
+// group-by-location Verify → Sweep → Synthesize, with phases the effort
+// level's profile turns off skipped — and returns the ranked, capped findings.
 func (p *Pipeline) Run(ctx context.Context) (Result, error) {
 	res := Result{AngleCounts: map[string]int{}}
+	prof := p.cfg.EffortProfile()
 
 	if trivial, reason := p.packet.IsTrivial(); trivial {
 		res.TrivialPass = reason
@@ -87,13 +87,18 @@ func (p *Pipeline) Run(ctx context.Context) (Result, error) {
 	}
 
 	// Phase 0 — Scope: a shared summary + the applicable CLAUDE.md conventions,
-	// pinned once so every finder does not re-derive them. Best-effort.
-	p.progress("scope: summarizing the change")
-	brief := p.briefWithScope(p.runScope(ctx))
+	// pinned once so every finder does not re-derive them. Best-effort; low
+	// effort skips the extra call and reviews from the deterministic brief.
+	brief := p.packet.Brief
+	if prof.Scope {
+		p.progress("scope: summarizing the change")
+		brief = p.briefWithScope(p.runScope(ctx))
+	}
 
-	// Phase 1 — Find: five correctness angles + one cleanup agent, in parallel.
-	p.progress(fmt.Sprintf("finders: %d correctness angles + cleanup", len(CorrectnessAngles)))
-	cands := p.runFinders(ctx, brief, &res)
+	// Phase 1 — Find: the level's correctness angles (plus the cleanup agent on
+	// medium and up), in parallel.
+	p.progress(fmt.Sprintf("finders: %d correctness angles", len(prof.Angles)))
+	cands := p.runFinders(ctx, brief, prof, &res)
 
 	// Canonicalize finder-returned paths against the changed-file list so grouping
 	// and reporting see one path per file, then record cross-angle consensus.
@@ -103,17 +108,29 @@ func (p *Pipeline) Run(ctx context.Context) (Result, error) {
 	res.Consensus = countConsensus(cands)
 
 	// Phase 2 — Verify: one verifier per file:line location, judging each pooled
-	// candidate independently.
-	p.progress(fmt.Sprintf("validators: %d locations", len(groupByLocation(cands))))
-	findings := p.runVerify(ctx, brief, cands, &res)
+	// candidate independently. Low effort reports the single pass unverified.
+	var findings []Finding
+	if prof.Verify {
+		p.progress(fmt.Sprintf("validators: %d locations", len(groupByLocation(cands))))
+		findings = p.runVerify(ctx, brief, cands, &res)
+	} else {
+		findings = unverifiedFindings(cands)
+	}
 
-	// Phase 3 — Sweep: a fresh finder with the verified list hunts only for gaps;
-	// its candidates re-enter the same per-location verify. Budget-gated.
-	if !p.deps.budget.Exhausted() {
+	// Phase 3 — Sweep (xhigh/max): a fresh finder with the verified list hunts
+	// only for gaps; its candidates re-enter the same per-location verify.
+	// Budget-gated.
+	if prof.Sweep && !p.deps.budget.Exhausted() {
 		res.SweepRan = true
 		p.progress("sweep: hunting for missed defects")
 		swept := p.runSweep(ctx, brief, findings, &res)
 		findings = append(findings, p.runVerify(ctx, brief, swept, &res)...)
+	}
+
+	// Precision levels (medium) keep only what the verifier positively
+	// confirmed; recall levels also keep PLAUSIBLE survivors.
+	if prof.ConfirmedOnly {
+		findings = confirmedOnly(findings)
 	}
 
 	// Merge survivors at one location into one finding, then rank.
@@ -121,10 +138,13 @@ func (p *Pipeline) Run(ctx context.Context) (Result, error) {
 	SortFindings(findings)
 
 	// Phase 4 — Synthesize: merge same-root-cause findings across locations and
-	// cap. Falls back to the ranked, capped list if the pass yields nothing.
-	if len(findings) > 0 {
+	// cap. Falls back to the ranked, capped list if the pass yields nothing or
+	// the level skips it.
+	if len(findings) > 0 && prof.Synthesize {
 		p.progress("synthesize: merging and ranking findings")
-		findings = p.runSynthesize(ctx, findings)
+		findings = p.runSynthesize(ctx, findings, prof.MaxFindings)
+	} else {
+		findings = capFindings(findings, prof.MaxFindings)
 	}
 	SortFindings(findings)
 	res.Findings = findings
@@ -158,8 +178,7 @@ func (p *Pipeline) runScope(ctx context.Context) scopeNote {
 	if p.deps.budget.Exhausted() {
 		return scopeNote{}
 	}
-	limits := agentcore.Limits{MaxTurns: 8, MaxToolCalls: 24, MaxToolResultLen: 24_000, MaxContextTokens: 160_000}
-	ag, err := p.deps.roleAgent(p.cfg.ModelCheap, ScopePrompt(), "", limits)
+	ag, err := p.deps.roleAgent(p.cfg.ModelCheap, ScopePrompt(), "", p.cfg.EffortProfile().Limits.Scope)
 	if err != nil {
 		return scopeNote{}
 	}
@@ -205,7 +224,7 @@ func (p *Pipeline) briefWithScope(s scopeNote) string {
 
 // --- Phase 1: finders ---
 
-func (p *Pipeline) runFinders(ctx context.Context, brief string, res *Result) []Candidate {
+func (p *Pipeline) runFinders(ctx context.Context, brief string, prof EffortProfile, res *Result) []Candidate {
 	type job struct {
 		label   string
 		charter string
@@ -214,11 +233,13 @@ func (p *Pipeline) runFinders(ctx context.Context, brief string, res *Result) []
 		clamp   bool
 	}
 	var jobs []job
-	for _, a := range CorrectnessAngles {
-		jobs = append(jobs, job{label: a, charter: AngleCharter(a), model: p.cfg.ModelStrong, cap: perAngle})
+	for _, a := range prof.Angles {
+		jobs = append(jobs, job{label: a, charter: AngleCharter(a), model: p.cfg.ModelStrong, cap: prof.PerAngle})
 	}
 	// One cleanup agent covers all five lenses; a cheaper tier and MINOR-clamped.
-	jobs = append(jobs, job{label: AngleCleanup, charter: CleanupCharter(), model: p.cfg.ModelCheap, cap: cleanupLenses * perAngle, clamp: true})
+	if prof.Cleanup {
+		jobs = append(jobs, job{label: AngleCleanup, charter: CleanupCharter(), model: p.cfg.ModelCheap, cap: cleanupLenses * prof.PerAngle, clamp: true})
+	}
 
 	type out struct {
 		label string
@@ -251,8 +272,7 @@ func (p *Pipeline) runFinders(ctx context.Context, brief string, res *Result) []
 }
 
 func (p *Pipeline) runOneFinder(ctx context.Context, brief, label, charter, model string, cap int, clampMinor bool) []Candidate {
-	limits := agentcore.Limits{MaxTurns: 16, MaxToolCalls: 48, MaxToolResultLen: 24_000, MaxContextTokens: 200_000}
-	ag, err := p.deps.roleAgent(model, FinderPreamble(), charter, limits)
+	ag, err := p.deps.roleAgent(model, FinderPreamble(), charter, p.cfg.EffortProfile().Limits.Finder)
 	if err != nil {
 		return nil
 	}
@@ -321,8 +341,7 @@ func (p *Pipeline) wrapUpCandidates(ctx context.Context, tag, model, soul, chart
 	if !isTruncated(r.StopReason) || p.deps.budget.Exhausted() {
 		return nil
 	}
-	limits := agentcore.Limits{MaxTurns: 1, MaxToolCalls: 0, MaxToolResultLen: 24_000, MaxContextTokens: 200_000}
-	ag, err := p.deps.roleAgent(model, soul, charter, limits)
+	ag, err := p.deps.roleAgent(model, soul, charter, p.cfg.EffortProfile().Limits.WrapUp)
 	if err != nil {
 		return nil
 	}
@@ -353,8 +372,7 @@ func (p *Pipeline) wrapUpVerdicts(ctx context.Context, key string, r agentcore.R
 	if !isTruncated(r.StopReason) || p.deps.budget.Exhausted() {
 		return nil
 	}
-	limits := agentcore.Limits{MaxTurns: 1, MaxToolCalls: 0, MaxToolResultLen: 24_000, MaxContextTokens: 200_000}
-	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, ValidatorPrompt(), "", limits)
+	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, ValidatorPrompt(), "", p.cfg.EffortProfile().Limits.WrapUp)
 	if err != nil {
 		return nil
 	}
@@ -433,8 +451,7 @@ func (p *Pipeline) runVerify(ctx context.Context, brief string, cands []Candidat
 // counts. On a run or parse failure it keeps the candidates as unvalidated
 // PLAUSIBLE (recall-biased) rather than dropping real findings to an infra blip.
 func (p *Pipeline) verifyGroup(ctx context.Context, brief string, group []Candidate) (findings []Finding, validated, rejected int, rejRules []string) {
-	limits := agentcore.Limits{MaxTurns: 12, MaxToolCalls: 32, MaxToolResultLen: 24_000, MaxContextTokens: 160_000}
-	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, ValidatorPrompt(), "", limits)
+	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, ValidatorPrompt(), "", p.cfg.EffortProfile().Limits.Verify)
 	if err != nil {
 		return passthrough(group), 0, 0, nil
 	}
@@ -489,6 +506,31 @@ func (p *Pipeline) verifyGroup(ctx context.Context, brief string, group []Candid
 	return findings, validated, rejected, rejRules
 }
 
+// unverifiedFindings converts candidates straight to findings — low effort's
+// single diff pass reports without a verify phase, so nothing here is a
+// verifier's verdict.
+func unverifiedFindings(cands []Candidate) []Finding {
+	out := make([]Finding, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, Finding{Candidate: c, Verdict: VerdictPlausible,
+			Rationale: "reported without verification (effort: low)."})
+	}
+	return out
+}
+
+// confirmedOnly keeps only the findings a verifier positively CONFIRMED — the
+// precision posture of effort medium. PLAUSIBLE survivors (including budget or
+// verifier-failure passthroughs) are dropped, trading recall for confidence.
+func confirmedOnly(findings []Finding) []Finding {
+	out := findings[:0]
+	for _, f := range findings {
+		if f.Verdict == VerdictConfirmed {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
 // passthrough keeps a location's candidates as unvalidated PLAUSIBLE findings —
 // used when a verifier run cannot produce a usable verdict, so a transient
 // failure never silently drops real findings.
@@ -507,8 +549,7 @@ func passthrough(group []Candidate) []Finding {
 // defects not already on it. Returns raw candidates for the caller to verify.
 func (p *Pipeline) runSweep(ctx context.Context, brief string, found []Finding, res *Result) []Candidate {
 	known, _ := json.Marshal(found)
-	limits := agentcore.Limits{MaxTurns: 16, MaxToolCalls: 48, MaxToolResultLen: 24_000, MaxContextTokens: 200_000}
-	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, FinderPreamble(), SweepCharter(), limits)
+	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, FinderPreamble(), SweepCharter(), p.cfg.EffortProfile().Limits.Finder)
 	if err != nil {
 		return nil
 	}
@@ -544,10 +585,10 @@ type synthDecision struct {
 }
 
 // runSynthesize merges same-root-cause findings across locations and caps the
-// result, working from the synthesis agent's by-index decisions. It falls back
-// to the ranked, capped input when the pass is skipped (budget) or yields
-// nothing usable.
-func (p *Pipeline) runSynthesize(ctx context.Context, ranked []Finding) []Finding {
+// result at the level's max, working from the synthesis agent's by-index
+// decisions. It falls back to the ranked, capped input when the pass is
+// skipped (budget) or yields nothing usable.
+func (p *Pipeline) runSynthesize(ctx context.Context, ranked []Finding, maxFindings int) []Finding {
 	if len(ranked) == 0 {
 		return ranked
 	}
@@ -555,9 +596,8 @@ func (p *Pipeline) runSynthesize(ctx context.Context, ranked []Finding) []Findin
 		return capFindings(ranked, maxFindings)
 	}
 	// Toolless: the agent reorders/merges indices, it does not re-read files.
-	limits := agentcore.Limits{MaxTurns: 1, MaxToolCalls: 0, MaxToolResultLen: 16_000, MaxContextTokens: 160_000}
 	soul := strings.ReplaceAll(SynthesizePrompt(), "{{MAX}}", fmt.Sprintf("%d", maxFindings))
-	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, soul, "", limits)
+	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, soul, "", p.cfg.EffortProfile().Limits.Synthesize)
 	if err != nil {
 		return capFindings(ranked, maxFindings)
 	}

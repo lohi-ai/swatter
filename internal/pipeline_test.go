@@ -156,7 +156,7 @@ func TestBudgetLedger_TokenBackstopFires(t *testing.T) {
 	// Unknown gateway model prices $0; the token backstop must still fire.
 	cfg := Config{MaxUSD: 100, MaxTokensTotal: 1000}
 	b := NewBudget(cfg)
-	gate := b.Gate()
+	gate := b.Gate(-1)
 	if gate(nil, agentcore.Usage{InputTokens: 500}) {
 		t.Fatal("should not fire under cap")
 	}
@@ -176,7 +176,7 @@ func TestBudgetLedger_TokenBackstopFires(t *testing.T) {
 func TestBudgetLedger_PriceOverrideMeters(t *testing.T) {
 	cfg := Config{MaxUSD: 1.0, MaxTokensTotal: 0, PricePerMTokIn: 3.0, PricePerMTokOut: 15.0}
 	b := NewBudget(cfg)
-	gate := b.Gate()
+	gate := b.Gate(-1)
 	// 200k in + 40k out = 0.6 + 0.6 = $1.2 > $1.0 → fire, even though agentcore
 	// priced the usage at $0 (unknown model).
 	u := agentcore.Usage{InputTokens: 200_000, OutputTokens: 40_000, CostUSD: 0}

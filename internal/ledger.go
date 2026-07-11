@@ -19,12 +19,12 @@ import (
 //     price override when the model is a custom gateway id agentcore prices $0).
 //   - maxTokens is the always-works ceiling for unknown-price models.
 type Budget struct {
-	mu             sync.Mutex
-	committedUSD   float64
-	committedTok   int
-	maxUSD         float64
-	maxTokens      int
-	pricePerMTokIn float64
+	mu              sync.Mutex
+	committedUSD    float64
+	committedTok    int
+	maxUSD          float64
+	maxTokens       int
+	pricePerMTokIn  float64
 	pricePerMTokOut float64
 }
 
@@ -59,10 +59,15 @@ func tokens(u agentcore.Usage) int {
 }
 
 // Gate returns a per-run agentcore BudgetGate closure. It stops the run once
-// committed spend (from finished runs) plus this run's live usage crosses
-// either cap.
-func (b *Budget) Gate() func(ctx context.Context, u agentcore.Usage) bool {
+// this run's own usage reaches runGateTokens (the per-agent effort cap's
+// wind-down threshold — see gateTokens; 0 fires immediately, negative means
+// uncapped), or once committed spend (from finished runs) plus this run's live
+// usage crosses either shared cap.
+func (b *Budget) Gate(runGateTokens int) func(ctx context.Context, u agentcore.Usage) bool {
 	return func(_ context.Context, u agentcore.Usage) bool {
+		if runGateTokens >= 0 && tokens(u) >= runGateTokens {
+			return true
+		}
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		projUSD := b.committedUSD + b.effectiveCost(u)

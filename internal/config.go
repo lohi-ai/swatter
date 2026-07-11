@@ -40,13 +40,19 @@ type Config struct {
 	ModelStrong string
 	ModelCheap  string
 
+	// Effort selects the review level from the reference table (low | medium |
+	// high | xhigh | max): the pipeline fan-out (angles, candidate caps, verify/
+	// sweep, findings cap) plus a hard per-agent token cap — high keeps every
+	// role agent under 120K tokens, medium and low under that. See EffortProfile.
+	Effort Effort
+
 	// Budget backstops. MaxUSD uses agentcore pricing (known models only);
 	// MaxTokensTotal is the always-works ceiling for unknown gateway models
 	// whose per-token price agentcore can't look up. PricePerMTokIn/Out let a
 	// user teach the ledger a custom model's price so MaxUSD fires for it too.
-	MaxUSD         float64
-	MaxTokensTotal int
-	PricePerMTokIn float64
+	MaxUSD          float64
+	MaxTokensTotal  int
+	PricePerMTokIn  float64
 	PricePerMTokOut float64
 
 	FailOn FailOn
@@ -78,21 +84,22 @@ type Config struct {
 // applies the documented defaults.
 func LoadConfig() (Config, error) {
 	c := Config{
-		Provider:       Provider(envDefault("SWATTER_PROVIDER", string(ProviderAnthropic))),
-		APIKey:         os.Getenv("SWATTER_API_KEY"),
-		BaseURL:        os.Getenv("SWATTER_BASE_URL"),
-		ModelStrong:    os.Getenv("SWATTER_MODEL"),
-		ModelCheap:     os.Getenv("SWATTER_MODEL_CHEAP"),
-		MaxUSD:         envFloat("SWATTER_MAX_USD", 5.0),
-		MaxTokensTotal: envInt("SWATTER_MAX_TOKENS_TOTAL", 8_000_000),
-		PricePerMTokIn: envFloat("SWATTER_PRICE_PER_MTOK_IN", 0),
+		Provider:        Provider(envDefault("SWATTER_PROVIDER", string(ProviderAnthropic))),
+		APIKey:          os.Getenv("SWATTER_API_KEY"),
+		BaseURL:         os.Getenv("SWATTER_BASE_URL"),
+		ModelStrong:     os.Getenv("SWATTER_MODEL"),
+		ModelCheap:      os.Getenv("SWATTER_MODEL_CHEAP"),
+		Effort:          Effort(envDefault("SWATTER_EFFORT", string(EffortHigh))),
+		MaxUSD:          envFloat("SWATTER_MAX_USD", 5.0),
+		MaxTokensTotal:  envInt("SWATTER_MAX_TOKENS_TOTAL", 8_000_000),
+		PricePerMTokIn:  envFloat("SWATTER_PRICE_PER_MTOK_IN", 0),
 		PricePerMTokOut: envFloat("SWATTER_PRICE_PER_MTOK_OUT", 0),
-		FailOn:         FailOn(envDefault("SWATTER_FAIL_ON", string(FailOnNever))),
-		Briefing:       envBool("SWATTER_BRIEFING", true),
-		RepoRoot:       envDefault("SWATTER_REPO_ROOT", "."),
-		PromoteAfter:   envInt("SWATTER_RULE_PROMOTE_AFTER", 3),
-		RulesCommit:    envBool("SWATTER_RULES_COMMIT", true),
-		BotLogin:       envDefault("SWATTER_BOT_LOGIN", "github-actions[bot]"),
+		FailOn:          FailOn(envDefault("SWATTER_FAIL_ON", string(FailOnNever))),
+		Briefing:        envBool("SWATTER_BRIEFING", true),
+		RepoRoot:        envDefault("SWATTER_REPO_ROOT", "."),
+		PromoteAfter:    envInt("SWATTER_RULE_PROMOTE_AFTER", 3),
+		RulesCommit:     envBool("SWATTER_RULES_COMMIT", true),
+		BotLogin:        envDefault("SWATTER_BOT_LOGIN", "github-actions[bot]"),
 	}
 
 	// A strong model is mandatory. If SWATTER_MODEL is unset, fall back to a
@@ -127,6 +134,11 @@ func (c Config) validate() error {
 	case FailOnCritical, FailOnMajor, FailOnAny, FailOnNever:
 	default:
 		return fmt.Errorf("unknown fail_on %q (want critical | major | any | never)", c.FailOn)
+	}
+	switch c.Effort {
+	case EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax:
+	default:
+		return fmt.Errorf("unknown effort %q (want low | medium | high | xhigh | max)", c.Effort)
 	}
 	return nil
 }
