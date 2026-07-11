@@ -318,7 +318,12 @@ func quantify(n int, noun string) string {
 func angleLine(counts map[string]int) string {
 	var parts []string
 	for _, a := range AllAngles {
-		parts = append(parts, fmt.Sprintf("%s=%d", a, counts[a]))
+		// Only angles that ran have an entry (a ran-but-empty angle counts 0);
+		// lower effort levels run a subset, which the line should not misreport
+		// as "found nothing".
+		if n, ran := counts[a]; ran {
+			parts = append(parts, fmt.Sprintf("%s=%d", a, n))
+		}
 	}
 	return strings.Join(parts, " ")
 }

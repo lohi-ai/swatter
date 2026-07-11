@@ -69,6 +69,7 @@ advisory mode, fork-PR safety) in [docs/recipes.md](docs/recipes.md).
 | `base_url` | — | required for `openai-compat`. |
 | `model` | `claude-opus-4-8`\* | strong tier (bug/security angles, large diffs). |
 | `model_cheap` | = `model` | cheaper tier for cleanup angles on small diffs. |
+| `effort` | `high` | review level: `low` (1 diff pass → no verify → ≤4 findings), `medium` (3+5 angles × 6 → verify → ≤8, precision), `high` (same fan-out, recall-biased → ≤10), `xhigh` (5+5 angles × 8 → verify → sweep → ≤15), `max` (xhigh + API reasoning effort). Each level also hard-caps per-agent tokens — `high` stays under 120K per agent. |
 | `fail_on` | `never` | advisory by default (green check + comments). Set `critical`/`major`/`any` to gate merges — the `Swatter` check goes red on confirmed findings. |
 | `max_usd` | `5` | per-PR spend ceiling (priced models). |
 | `max_tokens_total` | `8000000` | always-works ceiling for unknown-priced models. |

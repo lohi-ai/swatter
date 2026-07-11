@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/lohi-ai/agentray/agentcore"
 )
 
 // clusterProposal is the clustering agent's output shape: one proposed rule
@@ -42,8 +40,7 @@ func (d *runnerDeps) clusterObservations(ctx context.Context, ledger *ObsLedger,
 	}
 	oj, _ := json.Marshal(wire)
 
-	limits := agentcore.Limits{MaxTurns: 3, MaxToolCalls: 2, MaxToolResultLen: 8_000, MaxContextTokens: 60_000}
-	ag, err := d.roleAgent(d.cfg.ModelStrong, FeedbackClusterPrompt(), "", limits)
+	ag, err := d.roleAgent(d.cfg.ModelStrong, FeedbackClusterPrompt(), "", d.cfg.EffortProfile().Limits.Learn)
 	if err != nil {
 		return nil, err
 	}

@@ -25,8 +25,7 @@ func (d *runnerDeps) LearnRules(ctx context.Context, packet *Packet, confirmed [
 		return 0, nil
 	}
 	fj, _ := json.Marshal(confirmed)
-	limits := agentcore.Limits{MaxTurns: 3, MaxToolCalls: 2, MaxToolResultLen: 8_000, MaxContextTokens: 60_000}
-	ag, err := d.roleAgent(d.cfg.ModelStrong, LearnPrompt(), "", limits)
+	ag, err := d.roleAgent(d.cfg.ModelStrong, LearnPrompt(), "", d.cfg.EffortProfile().Limits.Learn)
 	if err != nil {
 		return 0, err
 	}
@@ -73,9 +72,8 @@ func (d *runnerDeps) LearnRules(ctx context.Context, packet *Packet, confirmed [
 // normalized prefilter misses — the Litrans-bible near-dup lesson).
 func (d *runnerDeps) sameRuleJudge() SameRuleJudge {
 	return func(ctx context.Context, a, b string) (bool, error) {
-		limits := agentcore.Limits{MaxTurns: 1, MaxToolCalls: 0, MaxToolResultLen: 2_000, MaxContextTokens: 8_000}
 		soul := "You judge whether two code-review rules express the SAME underlying pattern (one a paraphrase, generalization, or subset of the other). Answer with a single word: YES or NO."
-		ag, err := d.roleAgent(d.cfg.ModelCheap, soul, "", limits)
+		ag, err := d.roleAgent(d.cfg.ModelCheap, soul, "", d.cfg.EffortProfile().Limits.Judge)
 		if err != nil {
 			return false, err
 		}

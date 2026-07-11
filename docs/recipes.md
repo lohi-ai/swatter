@@ -127,6 +127,28 @@ writer.
           price_per_mtok_out: '0.90'
 ```
 
+## Effort levels
+
+`effort` selects the review level (the reference level table). Each level also
+hard-caps every role agent's tokens — `high` keeps each agent under 120K, and
+lower levels under that:
+
+| level | pipeline |
+|---|---|
+| `low` | 1 diff pass → no verify → ≤4 findings |
+| `medium` | 3+5 angles × 6 candidates → 1-vote verify → ≤8 findings (precision) |
+| `high` (default) | 3+5 angles × 6 candidates → 1-vote verify (recall-biased) → ≤10 findings |
+| `xhigh` | 5+5 angles × 8 candidates → 1-vote verify → sweep → ≤15 findings |
+| `max` | same as xhigh; only the API reasoning effort differs, not the fan-out |
+
+```yaml
+      - uses: lohi-ai/swatter@v1
+        with:
+          api_key: ${{ secrets.SWATTER_API_KEY }}
+          effort: low        # cheapest level; xhigh/max for the deepest pass
+          max_usd: '1'       # the review-wide ledger still backstops everything
+```
+
 ## `@swatter review` re-trigger
 
 Re-run the review on demand by commenting `@swatter review` on the PR:

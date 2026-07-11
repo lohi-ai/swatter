@@ -116,17 +116,24 @@ func (d *runnerDeps) roleAgent(model, soul, agents string, limits agentcore.Limi
 		tools = d.readOnlyTools()
 		policy = agentcore.NewAllowList(sandbox.ToolReadFile, sandbox.ToolGrep, sandbox.ToolGlob)
 	}
+	prof := d.cfg.EffortProfile()
 	return agentcore.New(agentcore.Config{
 		Provider: d.provider(),
 		Model:    model,
 		Tools:    tools,
 		Policy:   policy,
+		// Set only at effort max — the one knob separating max from xhigh.
+		// Providers without a thinking-effort parameter ignore it.
+		ReasoningEffort: prof.ReasoningEffort,
 		Definition: agentcore.AgentDefinition{
 			Soul:   soul,
 			Agents: agents,
 		},
-		Limits:     &limits,
-		BudgetGate: d.budget.Gate(),
+		Limits: &limits,
+		// The gate holds this run under the effort level's per-agent token cap
+		// (wind-down starts early enough that the remaining turns fit — see
+		// gateTokens) and the review-wide ledger caps.
+		BudgetGate: d.budget.Gate(gateTokens(prof.PerAgentTokens, limits)),
 		// Every phase opts into provider prompt caching: an agent loop re-sends
 		// its whole transcript each turn, and the stable prefix (system + brief +
 		// diff) dwarfs each turn's delta — a finder's 18-turn run re-bills a ~30K
@@ -135,8 +142,9 @@ func (d *runnerDeps) roleAgent(model, soul, agents string, limits agentcore.Limi
 		// review and per role so agents never contend for one cache shard.
 		PromptCacheKey: fmt.Sprintf("swatter-%s-%s", d.reviewID, roleHash(model, soul, agents)),
 		// Deterministic caps keep per-PR cost bounded; a finder reads the diff
-		// and a handful of enclosing functions, not the whole tree.
-		MaxTokens: 8192,
+		// and a handful of enclosing functions, not the whole tree. The constant
+		// is part of the per-agent budget math in gateTokens.
+		MaxTokens: maxOutputTokens,
 	})
 }
 
