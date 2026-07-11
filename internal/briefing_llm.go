@@ -37,11 +37,28 @@ type briefFinding struct {
 }
 
 // maxWalkthrough and maxQuiz bound the briefing so the comment stays scannable
-// even when the model is verbose.
+// even when the model is verbose. maxBriefSummary/maxBriefBullet cap each field's
+// length so a single verbose (or hostile) field can't bloat the PR comment.
 const (
-	maxWalkthrough = 4
-	maxQuiz        = 3
+	maxWalkthrough  = 4
+	maxQuiz         = 3
+	maxBriefSummary = 600
+	maxBriefBullet  = 320
 )
+
+// defangBriefText makes one model-authored briefing string safe to embed in the
+// PR comment. The briefing is generated from the untrusted PR diff/title/body, so
+// its text is treated as hostile: whitespace runs collapse to single spaces so a
+// field stays one bullet/line (no injected markdown structure), the field is
+// length-capped, and raw angle brackets are escaped last so injected
+// <details>/<summary> tags can't break the comment's fold and a "<!-- swatter:…"
+// string can't spoof our hidden sticky/finding markers. Ordinary markdown (bold,
+// code spans, lists we add ourselves) still renders — only raw HTML is defanged.
+func defangBriefText(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	s = truncate(s, max)
+	return strings.NewReplacer("<", "&lt;", ">", "&gt;").Replace(s)
+}
 
 // BriefReview runs one bounded, toolless LLM pass that turns the diff and the
 // validated findings into a reviewer briefing. It has the whole diff inline, so
@@ -90,11 +107,11 @@ func sanitizeBriefing(b *Briefing) *Briefing {
 	if b == nil {
 		return nil
 	}
-	b.Summary = strings.TrimSpace(b.Summary)
+	b.Summary = defangBriefText(b.Summary, maxBriefSummary)
 
 	walk := b.Walkthrough[:0:0]
 	for _, w := range b.Walkthrough {
-		if w = strings.TrimSpace(w); w != "" {
+		if w = defangBriefText(w, maxBriefBullet); w != "" {
 			walk = append(walk, w)
 		}
 		if len(walk) == maxWalkthrough {
@@ -105,7 +122,7 @@ func sanitizeBriefing(b *Briefing) *Briefing {
 
 	quiz := b.Quiz[:0:0]
 	for _, q := range b.Quiz {
-		q.Q, q.A = strings.TrimSpace(q.Q), strings.TrimSpace(q.A)
+		q.Q, q.A = defangBriefText(q.Q, maxBriefBullet), defangBriefText(q.A, maxBriefBullet)
 		if q.Q == "" {
 			continue
 		}

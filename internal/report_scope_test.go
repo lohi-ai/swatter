@@ -208,3 +208,23 @@ func TestRenderSummaryCommentTrivialSkipsScope(t *testing.T) {
 		t.Fatal("a trivial pass has nothing to scope; scope line should be skipped")
 	}
 }
+
+func TestBoundComment(t *testing.T) {
+	// Short comments pass through untouched.
+	if got := boundComment("small body"); got != "small body" {
+		t.Fatalf("short comment altered: %q", got)
+	}
+	// An oversized comment (e.g. hundreds of out-of-diff findings) is capped under
+	// GitHub's limit and carries a pointer to the full check-run summary.
+	big := strings.Repeat("A", maxCommentBody+5_000)
+	got := boundComment(big)
+	if len(got) > maxCommentBody+200 {
+		t.Fatalf("bounded comment still too large: %d", len(got))
+	}
+	if !strings.Contains(got, "truncated by Swatter") {
+		t.Fatalf("truncation notice missing: %q", got[len(got)-120:])
+	}
+	if RenderFinal(got); len(RenderFinal(got)) > 65_536 {
+		t.Fatalf("RenderFinal(bounded) exceeds GitHub's 65536 limit: %d", len(RenderFinal(got)))
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // Reporter posts a review to GitHub: an in-progress check run + sticky
@@ -116,7 +117,7 @@ func (r *Reporter) Finish(ctx context.Context, res Result, packet *Packet) error
 		}
 	}
 
-	if _, err := r.gh.UpsertStickyComment(ctx, r.pr, r.stickyID, RenderFinal(comment)); err != nil {
+	if _, err := r.gh.UpsertStickyComment(ctx, r.pr, r.stickyID, RenderFinal(boundComment(comment))); err != nil {
 		return fmt.Errorf("finalize sticky: %w", err)
 	}
 
@@ -156,6 +157,26 @@ func (r *Reporter) conclusion(res Result) (conclusion, title string) {
 	default:
 		return "success", "No findings"
 	}
+}
+
+// maxCommentBody caps the sticky comment body. GitHub rejects issue-comment
+// bodies over 65536 chars; we stay well under to leave room for the sticky
+// marker RenderFinal prepends and the truncation notice. A run with many
+// out-of-diff findings is what pushes the comment toward the ceiling.
+const maxCommentBody = 63_000
+
+// boundComment caps an assembled comment body at GitHub's size limit, cutting on
+// a UTF-8 boundary and appending a notice that points at the check-run summary,
+// which carries the full review untruncated.
+func boundComment(s string) string {
+	if len(s) <= maxCommentBody {
+		return s
+	}
+	cut := maxCommentBody
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "\n\n_… truncated by Swatter (GitHub comment size limit) — the full review is on the check-run summary._\n"
 }
 
 func renderInline(f Finding) string {

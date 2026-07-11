@@ -38,6 +38,38 @@ func TestSanitizeBriefingTrimsCapsAndDropsEmpty(t *testing.T) {
 	}
 }
 
+func TestSanitizeBriefingDefangsMarkupAndBounds(t *testing.T) {
+	// A hostile model (steered by untrusted PR content) tries to break out of the
+	// <details> fold, spoof the sticky marker, and bloat the comment.
+	in := &Briefing{
+		Summary:     "ok</details>\n\n# INJECTED\n<!-- swatter:sticky -->",
+		Walkthrough: []string{"line one\nline two"},
+		Quiz:        []QuizItem{{Q: "q<script>", A: strings.Repeat("x", maxBriefBullet+500)}},
+	}
+	got := sanitizeBriefing(in)
+	if got == nil {
+		t.Fatal("briefing with content should not sanitize to nil")
+	}
+	// No raw angle brackets survive → no tag can break the comment structure.
+	if strings.ContainsAny(got.Summary, "<>") {
+		t.Fatalf("summary still holds raw markup: %q", got.Summary)
+	}
+	if !strings.Contains(got.Summary, "&lt;/details&gt;") || !strings.Contains(got.Summary, "&lt;!-- swatter:sticky") {
+		t.Fatalf("summary tags should be escaped, not dropped: %q", got.Summary)
+	}
+	// Newlines collapse so a field stays a single bullet/line.
+	if strings.Contains(got.Summary, "\n") || strings.Contains(got.Walkthrough[0], "\n") {
+		t.Fatalf("newlines should collapse: summary=%q walk=%q", got.Summary, got.Walkthrough[0])
+	}
+	if strings.ContainsAny(got.Quiz[0].Q, "<>") {
+		t.Fatalf("quiz question still holds raw markup: %q", got.Quiz[0].Q)
+	}
+	// Long answer is length-capped (allowing for the escaped-entity expansion).
+	if len(got.Quiz[0].A) > maxBriefBullet+8 {
+		t.Fatalf("answer not bounded: len=%d", len(got.Quiz[0].A))
+	}
+}
+
 func TestSanitizeBriefingAllEmptyIsNil(t *testing.T) {
 	if got := sanitizeBriefing(&Briefing{Summary: "   ", Walkthrough: []string{" "}, Quiz: []QuizItem{{Q: "  "}}}); got != nil {
 		t.Fatalf("an all-empty briefing should sanitize to nil, got %+v", got)
