@@ -2,9 +2,13 @@ package internal
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/lohi-ai/agentray/agentcore"
 	"github.com/lohi-ai/agentray/sandbox"
@@ -16,6 +20,10 @@ type runnerDeps struct {
 	cfg    Config
 	budget *Budget
 	ws     *sandbox.Workspace
+	// reviewID salts every role agent's prompt-cache key so this review's cached
+	// prefixes never collide with another run's (and a gateway can route each
+	// agent's turns to the same cache shard).
+	reviewID string
 	// sink, when non-nil (SWATTER_TRACE set), receives one TraceRecord per LLM
 	// call — the request messages, response, tokens, cost, and latency — so a
 	// run's harness can be reviewed after the fact.
@@ -33,13 +41,24 @@ func newRunnerDeps(cfg Config, budget *Budget) (*runnerDeps, error) {
 	if err != nil {
 		return nil, fmt.Errorf("workspace at %q: %w", cfg.RepoRoot, err)
 	}
-	d := &runnerDeps{cfg: cfg, budget: budget, ws: ws}
+	d := &runnerDeps{cfg: cfg, budget: budget, ws: ws, reviewID: newReviewID()}
 	if path := strings.TrimSpace(os.Getenv("SWATTER_TRACE")); path != "" {
 		if sink, err := agentcore.NewFileTraceSink(path); err == nil {
 			d.sink = sink
 		}
 	}
 	return d, nil
+}
+
+// newReviewID returns a short random id used to salt prompt-cache keys. On the
+// (never-seen) chance the OS entropy read fails, a time-based fallback keeps the
+// key unique enough — caching is an optimization, not a correctness concern.
+func newReviewID() string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return fmt.Sprintf("t%x", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // provider builds the review provider: the BYOK inner provider (or a test
@@ -108,10 +127,29 @@ func (d *runnerDeps) roleAgent(model, soul, agents string, limits agentcore.Limi
 		},
 		Limits:     &limits,
 		BudgetGate: d.budget.Gate(),
+		// Every phase opts into provider prompt caching: an agent loop re-sends
+		// its whole transcript each turn, and the stable prefix (system + brief +
+		// diff) dwarfs each turn's delta — a finder's 18-turn run re-bills a ~30K
+		// prefix 18× without it. Anthropic gets cache_control breakpoints; an
+		// OpenAI-wire gateway gets prompt_cache_key routing. The key is unique per
+		// review and per role so agents never contend for one cache shard.
+		PromptCacheKey: fmt.Sprintf("swatter-%s-%s", d.reviewID, roleHash(model, soul, agents)),
 		// Deterministic caps keep per-PR cost bounded; a finder reads the diff
 		// and a handful of enclosing functions, not the whole tree.
 		MaxTokens: 8192,
 	})
+}
+
+// roleHash fingerprints a role (model + prompts) for the prompt-cache key, so
+// each distinct agent in the review gets its own cache identity.
+func roleHash(model, soul, agents string) string {
+	h := fnv.New32a()
+	h.Write([]byte(model))
+	h.Write([]byte{0})
+	h.Write([]byte(soul))
+	h.Write([]byte{0})
+	h.Write([]byte(agents))
+	return fmt.Sprintf("%08x", h.Sum32())
 }
 
 // run executes a role agent on an input prompt, commits its usage to the shared

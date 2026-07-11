@@ -1,5 +1,5 @@
-github.com/lohi-ai/agentray v0.1.1 h1:CKAwAX/+hvzFFkjlfe3ruUHfvhJ1LrAQfg5T0ZAJdXg=
-github.com/lohi-ai/agentray v0.1.1/go.mod h1:lKZmvMko7rn8C3GkWflV0CyinkYfeCtkaJQ/RZ1hQI8=
+github.com/lohi-ai/agentray v0.1.2 h1:r4Yf9DCm3ALfNt38IVokNsR9vg/mpOKS9pBahkANh8U=
+github.com/lohi-ai/agentray v0.1.2/go.mod h1:lKZmvMko7rn8C3GkWflV0CyinkYfeCtkaJQ/RZ1hQI8=
 golang.org/x/net v0.53.0 h1:d+qAbo5L0orcWAr0a9JweQpjXF19LMXJE8Ey7hwOdUA=
 golang.org/x/net v0.53.0/go.mod h1:JvMuJH7rrdiCfbeHoo3fCQU24Lf5JJwT9W3sJFulfgs=
 golang.org/x/text v0.36.0 h1:JfKh3XmcRPqZPKevfXVpI1wXPTqbkE5f7JA92a55Yxg=
