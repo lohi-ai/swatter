@@ -81,13 +81,15 @@ func TestBudgetLedger_PriceOverrideMeters(t *testing.T) {
 func TestIsTruncated(t *testing.T) {
 	// The cap states that leave Final without a final answer — a wrap-up turn
 	// can salvage these.
-	for _, s := range []string{"max_turns", "max_tool_calls", "budget_exhausted"} {
+	for _, s := range []string{"max_turns", "max_tool_calls"} {
 		if !isTruncated(s) {
 			t.Errorf("isTruncated(%q) = false, want true", s)
 		}
 	}
-	// Clean or errored stops must not trigger a wrap-up.
-	for _, s := range []string{"stop", "", "end_turn", "error", "aborted", "halted"} {
+	// budget_exhausted is deliberately NOT truncated: the wrap-up is a fresh LLM
+	// call the spent ledger cannot fund, and agentcore already summarizes on it.
+	// Clean, budget, or errored stops must not trigger a wrap-up.
+	for _, s := range []string{"stop", "", "end_turn", "budget_exhausted", "error", "aborted", "halted"} {
 		if isTruncated(s) {
 			t.Errorf("isTruncated(%q) = true, want false", s)
 		}

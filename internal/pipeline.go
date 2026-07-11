@@ -176,10 +176,14 @@ const wrapupInstruction = "Stop exploring — you have reached your read budget 
 
 // isTruncated reports whether a run stopped because it hit a hard cap rather than
 // finishing — the states in which Final holds no final answer and a wrap-up turn
-// can salvage the work already done.
+// can salvage the work already done. It deliberately omits "budget_exhausted":
+// the wrap-up is itself a fresh LLM call, so once the ledger is spent there is
+// nothing left to fund it (wrapUpCandidates would bail anyway), and agentcore
+// already runs its own un-gated summarize turn on budget exhaustion, so Final is
+// usually parseable without our help.
 func isTruncated(stopReason string) bool {
 	switch stopReason {
-	case "max_turns", "max_tool_calls", "budget_exhausted":
+	case "max_turns", "max_tool_calls":
 		return true
 	}
 	return false
