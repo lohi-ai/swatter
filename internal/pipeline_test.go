@@ -78,6 +78,39 @@ func TestBudgetLedger_PriceOverrideMeters(t *testing.T) {
 	}
 }
 
+func TestIsTruncated(t *testing.T) {
+	// The cap states that leave Final without a final answer — a wrap-up turn
+	// can salvage these.
+	for _, s := range []string{"max_turns", "max_tool_calls", "budget_exhausted"} {
+		if !isTruncated(s) {
+			t.Errorf("isTruncated(%q) = false, want true", s)
+		}
+	}
+	// Clean or errored stops must not trigger a wrap-up.
+	for _, s := range []string{"stop", "", "end_turn", "error", "aborted", "halted"} {
+		if isTruncated(s) {
+			t.Errorf("isTruncated(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestNormalizeCandidateSeverities(t *testing.T) {
+	got := normalizeCandidateSeverities([]Candidate{
+		{},                     // missing → MINOR
+		{Severity: "critical"}, // lower-case → canonical CRITICAL
+		{Severity: SevMajor},   // already canonical
+	})
+	if got[0].Severity != SevMinor {
+		t.Errorf("missing severity → %q, want %q", got[0].Severity, SevMinor)
+	}
+	if got[1].Severity != SevCritical {
+		t.Errorf("\"critical\" → %q, want %q", got[1].Severity, SevCritical)
+	}
+	if got[2].Severity != SevMajor {
+		t.Errorf("canonical MAJOR → %q, want %q", got[2].Severity, SevMajor)
+	}
+}
+
 func TestConfigFails(t *testing.T) {
 	maj := Config{FailOn: FailOnMajor}
 	if !maj.Fails(SevCritical) || !maj.Fails(SevMajor) || maj.Fails(SevMinor) {

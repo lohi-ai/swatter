@@ -167,6 +167,68 @@ func (p *Pipeline) runFinders(ctx context.Context, groups [][]string, res *Resul
 }
 
 // runOneFinder dispatches one finder run for a group of angles (usually one).
+// wrapupInstruction is the final, toolless turn we inject when a finder or sweep
+// hits its turn/tool ceiling before emitting JSON. agentcore truncates such a
+// run cleanly but leaves Final as the last (non-JSON) assistant text, so the
+// angle would otherwise be silently lost. We resume its transcript and ask it to
+// conclude from what it already read.
+const wrapupInstruction = "Stop exploring — you have reached your read budget for this pass. Do NOT ask for more tools. Using only what you have already read, output your final JSON array of candidates now. If nothing qualifies, return []. Return the JSON array only, no prose."
+
+// isTruncated reports whether a run stopped because it hit a hard cap rather than
+// finishing — the states in which Final holds no final answer and a wrap-up turn
+// can salvage the work already done.
+func isTruncated(stopReason string) bool {
+	switch stopReason {
+	case "max_turns", "max_tool_calls", "budget_exhausted":
+		return true
+	}
+	return false
+}
+
+// wrapUpCandidates salvages a candidate-producing run (finder or sweep) that was
+// truncated before it emitted JSON. It replays the run's transcript through a
+// fresh, single-turn, toolless agent (roleAgent drops the toolset when
+// MaxToolCalls == 0) and parses whatever candidates the model concludes with.
+// Returns nil when the run finished cleanly, the budget is spent, or nothing
+// usable comes back — the caller falls back to the empty angle it already had.
+func (p *Pipeline) wrapUpCandidates(ctx context.Context, tag, model, soul, charter string, r agentcore.RunResult) []Candidate {
+	if !isTruncated(r.StopReason) || p.deps.budget.Exhausted() {
+		return nil
+	}
+	limits := agentcore.Limits{MaxTurns: 1, MaxToolCalls: 0, MaxToolResultLen: 24_000, MaxContextTokens: 200_000}
+	ag, err := p.deps.roleAgent(model, soul, charter, limits)
+	if err != nil {
+		return nil
+	}
+	// Copy the transcript before appending so we never alias the run's slice, then
+	// add the wrap-up as a final user turn (the transcript ends on tool results, so
+	// a following user message is well-formed).
+	history := append(append([]agentcore.Message{}, r.Messages...),
+		agentcore.Message{Role: agentcore.RoleUser, Content: wrapupInstruction})
+	ctx = agentcore.WithTraceID(ctx, tag+":wrapup")
+	rr, err := p.deps.runContinue(ctx, ag, history, wrapupInstruction)
+	if err != nil {
+		return nil
+	}
+	cands, err := ParseCandidates(rr.Final)
+	if err != nil {
+		return nil
+	}
+	return cands
+}
+
+// normalizeCandidateSeverities defaults a missing severity to MINOR and canonicalizes
+// the rest — shared by the finder and its wrap-up path.
+func normalizeCandidateSeverities(cands []Candidate) []Candidate {
+	for i := range cands {
+		if cands[i].Severity == "" {
+			cands[i].Severity = SevMinor
+		}
+		cands[i].Severity = ParseSeverity(string(cands[i].Severity))
+	}
+	return cands
+}
+
 func (p *Pipeline) runOneFinder(ctx context.Context, angles []string) []Candidate {
 	model := p.cfg.ModelStrong
 	if isCheapEligible(angles, p.packet.ChangedLines) {
@@ -178,7 +240,7 @@ func (p *Pipeline) runOneFinder(ctx context.Context, angles []string) []Candidat
 		charters.WriteString("\n\n")
 	}
 	cap := lensCap(p.packet.ChangedLines)
-	limits := agentcore.Limits{MaxTurns: 8, MaxToolCalls: 20, MaxToolResultLen: 24_000, MaxContextTokens: 120_000}
+	limits := agentcore.Limits{MaxTurns: 16, MaxToolCalls: 48, MaxToolResultLen: 24_000, MaxContextTokens: 200_000}
 
 	ag, err := p.deps.roleAgent(model, FinderPreamble(), charters.String(), limits)
 	if err != nil {
@@ -186,22 +248,21 @@ func (p *Pipeline) runOneFinder(ctx context.Context, angles []string) []Candidat
 	}
 	input := fmt.Sprintf("%s\n\n## Diff\n```diff\n%s\n```\n\nYour angle(s): %s. Report up to %d candidates per angle. Return the JSON array only.",
 		p.packet.Brief, p.packet.Diff, strings.Join(angles, ", "), cap)
-	ctx = agentcore.WithTraceID(ctx, "finder:"+strings.Join(angles, ""))
+	tag := "finder:" + strings.Join(angles, "")
+	ctx = agentcore.WithTraceID(ctx, tag)
 	r, err := p.deps.run(ctx, ag, input)
 	if err != nil {
 		return nil
 	}
-	cands, err := ParseCandidates(r.Final)
-	if err != nil {
+	cands, perr := ParseCandidates(r.Final)
+	if isTruncated(r.StopReason) && (perr != nil || len(cands) == 0) {
+		// The finder ran out of turns/tool calls before reporting; recover the
+		// angle with one toolless wrap-up turn instead of dropping it silently.
+		cands = p.wrapUpCandidates(ctx, tag, model, FinderPreamble(), charters.String(), r)
+	} else if perr != nil {
 		return nil
 	}
-	for i := range cands {
-		if cands[i].Severity == "" {
-			cands[i].Severity = SevMinor
-		}
-		cands[i].Severity = ParseSeverity(string(cands[i].Severity))
-	}
-	return cands
+	return normalizeCandidateSeverities(cands)
 }
 
 func (p *Pipeline) runValidators(ctx context.Context, cands []Candidate, res *Result) []Finding {
@@ -244,7 +305,7 @@ func (p *Pipeline) runValidators(ctx context.Context, cands []Candidate, res *Re
 // validateOne runs an independent validator on a candidate. ok=false means
 // REJECT (or an unparseable/failed run, which we treat as a drop).
 func (p *Pipeline) validateOne(ctx context.Context, c Candidate) (Finding, bool) {
-	limits := agentcore.Limits{MaxTurns: 6, MaxToolCalls: 16, MaxToolResultLen: 24_000, MaxContextTokens: 120_000}
+	limits := agentcore.Limits{MaxTurns: 12, MaxToolCalls: 32, MaxToolResultLen: 24_000, MaxContextTokens: 160_000}
 	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, ValidatorPrompt(), "", limits)
 	if err != nil {
 		return Finding{}, false
@@ -273,7 +334,7 @@ func (p *Pipeline) validateOne(ctx context.Context, c Candidate) (Finding, bool)
 func (p *Pipeline) runSweep(ctx context.Context, found []Finding, res *Result) []Finding {
 	known, _ := json.Marshal(found)
 	charter := "# Sweep\n\nYou get the diff and the list of defects already found. Hunt ONLY for defects **not** already on that list — a fresh pass with different eyes. An empty result is a fine outcome; do not restate known findings."
-	limits := agentcore.Limits{MaxTurns: 8, MaxToolCalls: 20, MaxToolResultLen: 24_000, MaxContextTokens: 120_000}
+	limits := agentcore.Limits{MaxTurns: 16, MaxToolCalls: 48, MaxToolResultLen: 24_000, MaxContextTokens: 200_000}
 	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, FinderPreamble(), charter, limits)
 	if err != nil {
 		return nil
@@ -285,8 +346,10 @@ func (p *Pipeline) runSweep(ctx context.Context, found []Finding, res *Result) [
 	if err != nil {
 		return nil
 	}
-	cands, err := ParseCandidates(r.Final)
-	if err != nil {
+	cands, perr := ParseCandidates(r.Final)
+	if isTruncated(r.StopReason) && (perr != nil || len(cands) == 0) {
+		cands = p.wrapUpCandidates(ctx, "sweep", p.cfg.ModelStrong, FinderPreamble(), charter, r)
+	} else if perr != nil {
 		return nil
 	}
 	// Sweep candidates are reported as plausible (single-pass, no validator).

@@ -122,3 +122,14 @@ func (d *runnerDeps) run(ctx context.Context, ag *agentcore.Agent, input string)
 	d.budget.Commit(res.Usage)
 	return res, err
 }
+
+// runContinue resumes a role agent from a prior run's transcript (its working
+// memory) with a new task, committing usage like run. Used to salvage a phase
+// that hit its turn/tool ceiling before emitting its final answer: we replay
+// what it already gathered through a fresh, toolless agent and ask it to
+// conclude. task also seeds skill/memory recall.
+func (d *runnerDeps) runContinue(ctx context.Context, ag *agentcore.Agent, history []agentcore.Message, task string) (agentcore.RunResult, error) {
+	res, err := ag.Continue(ctx, history, task)
+	d.budget.Commit(res.Usage)
+	return res, err
+}
