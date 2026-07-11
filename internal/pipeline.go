@@ -186,6 +186,7 @@ func (p *Pipeline) runOneFinder(ctx context.Context, angles []string) []Candidat
 	}
 	input := fmt.Sprintf("%s\n\n## Diff\n```diff\n%s\n```\n\nYour angle(s): %s. Report up to %d candidates per angle. Return the JSON array only.",
 		p.packet.Brief, p.packet.Diff, strings.Join(angles, ", "), cap)
+	ctx = agentcore.WithTraceID(ctx, "finder:"+strings.Join(angles, ""))
 	r, err := p.deps.run(ctx, ag, input)
 	if err != nil {
 		return nil
@@ -251,6 +252,7 @@ func (p *Pipeline) validateOne(ctx context.Context, c Candidate) (Finding, bool)
 	cj, _ := json.Marshal(c)
 	input := fmt.Sprintf("%s\n\n## Candidate to validate\n```json\n%s\n```\n\nTrace it in the real code and return the JSON verdict object only.",
 		p.packet.Brief, string(cj))
+	ctx = agentcore.WithTraceID(ctx, "validator:"+findingLoc(Finding{Candidate: c}))
 	r, err := p.deps.run(ctx, ag, input)
 	if err != nil {
 		return Finding{}, false
@@ -278,6 +280,7 @@ func (p *Pipeline) runSweep(ctx context.Context, found []Finding, res *Result) [
 	}
 	input := fmt.Sprintf("%s\n\n## Diff\n```diff\n%s\n```\n\n## Already found (do not restate)\n```json\n%s\n```\n\nReturn the JSON array of NEW candidates only.",
 		p.packet.Brief, p.packet.Diff, string(known))
+	ctx = agentcore.WithTraceID(ctx, "sweep")
 	r, err := p.deps.run(ctx, ag, input)
 	if err != nil {
 		return nil

@@ -32,6 +32,7 @@ func (d *runnerDeps) LearnRules(ctx context.Context, packet *Packet, confirmed [
 	}
 	input := fmt.Sprintf("## Confirmed findings this review\n```json\n%s\n```\n\n## Existing rule book\n%s\n\nReturn the JSON array of new generalized rules.",
 		string(fj), fallback(store.Render(), "(empty)"))
+	ctx = agentcore.WithTraceID(ctx, "learn")
 	r, err := d.run(ctx, ag, input)
 	if err != nil {
 		return 0, err
@@ -79,6 +80,7 @@ func (d *runnerDeps) sameRuleJudge() SameRuleJudge {
 			return false, err
 		}
 		input := fmt.Sprintf("Rule A: %s\nRule B: %s\n\nSame pattern? Answer YES or NO.", a, b)
+		ctx = agentcore.WithTraceID(ctx, "dedup")
 		r, err := d.run(ctx, ag, input)
 		if err != nil {
 			return false, err

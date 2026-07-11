@@ -63,6 +63,7 @@ func (d *runnerDeps) BriefReview(ctx context.Context, packet *Packet, findings [
 	}
 	input := fmt.Sprintf("%s\n\n## Diff\n```diff\n%s\n```\n\n## Validated findings\n```json\n%s\n```\n\nReturn the JSON briefing object only.",
 		packet.Brief, packet.Diff, string(fj))
+	ctx = agentcore.WithTraceID(ctx, "briefing")
 	r, err := d.run(ctx, ag, input)
 	if err != nil {
 		return nil, err
