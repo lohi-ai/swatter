@@ -1,47 +1,154 @@
 package internal
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/lohi-ai/agentray/agentcore"
 )
 
-func TestPackAngles_BySize(t *testing.T) {
-	// Large diff: every angle rides alone.
-	if got := packAngles(2000); len(got) != len(AllAngles) {
-		t.Fatalf("large: want %d runs, got %d", len(AllAngles), len(got))
+// shortVerdictProvider always returns a one-element verdict array, regardless of
+// how many candidates it was asked to judge — the exact shape that used to make
+// verifyGroup silently drop the unjudged remainder.
+type shortVerdictProvider struct{}
+
+func (shortVerdictProvider) Name() string        { return "short" }
+func (shortVerdictProvider) SupportsTools() bool { return true }
+
+func (shortVerdictProvider) Chat(_ context.Context, _ agentcore.ChatRequest) (agentcore.ChatResponse, error) {
+	return agentcore.AssistantText(`[{"verdict":"CONFIRMED","severity":"MAJOR","rationale":"only the first"}]`), nil
+}
+
+func (shortVerdictProvider) Stream(_ context.Context, _ agentcore.ChatRequest) (<-chan agentcore.ChatDelta, error) {
+	ch := make(chan agentcore.ChatDelta, 2)
+	go func() {
+		defer close(ch)
+		ch <- agentcore.ChatDelta{ContentDelta: `[{"verdict":"CONFIRMED","severity":"MAJOR","rationale":"only the first"}]`}
+		ch <- agentcore.ChatDelta{Done: true, StopReason: "stop"}
+	}()
+	return ch, nil
+}
+
+// TestVerifyGroup_PartialVerdictsPassThrough guards the recall fix: when a
+// verifier returns fewer verdicts than the candidates it was handed, the
+// unjudged ones must survive as unvalidated PLAUSIBLE, not be dropped.
+func TestVerifyGroup_PartialVerdictsPassThrough(t *testing.T) {
+	cfg := Config{Provider: ProviderAnthropic, APIKey: "stub", ModelStrong: "s", ModelCheap: "c",
+		MaxUSD: 1000, MaxTokensTotal: 1 << 40, FailOn: FailOnNever, RepoRoot: "."}
+	deps, err := newRunnerDeps(cfg, NewBudget(cfg))
+	if err != nil {
+		t.Fatalf("deps: %v", err)
 	}
-	// Tiny diff: packed into 3 runs.
-	if got := packAngles(50); len(got) != 3 {
-		t.Fatalf("tiny: want 3 runs, got %d", len(got))
+	deps.inner = shortVerdictProvider{}
+	p := &Pipeline{cfg: cfg, deps: deps, packet: &Packet{}, progress: func(string) {}}
+
+	group := []Candidate{
+		{File: "a.go", Line: 5, Angle: "A", Summary: "first", Severity: SevMajor},
+		{File: "a.go", Line: 5, Angle: "C", Summary: "second", Severity: SevMajor},
 	}
-	// Normal: 6 runs, and every angle A–H appears exactly once across runs.
-	got := packAngles(400)
-	seen := map[string]int{}
-	for _, g := range got {
-		for _, a := range g {
-			seen[a]++
-		}
+	findings, validated, rejected, _ := p.verifyGroup(context.Background(), "brief", group)
+	if len(findings) != 2 {
+		t.Fatalf("want 2 findings (1 judged + 1 passthrough), got %d: %+v", len(findings), findings)
 	}
-	for _, a := range AllAngles {
-		if seen[a] != 1 {
-			t.Fatalf("normal: angle %s appears %d times, want 1", a, seen[a])
+	if validated != 1 || rejected != 0 {
+		t.Fatalf("want validated=1 rejected=0, got validated=%d rejected=%d", validated, rejected)
+	}
+	if findings[0].Verdict != VerdictConfirmed {
+		t.Errorf("judged candidate should be CONFIRMED, got %s", findings[0].Verdict)
+	}
+	if findings[1].Verdict != VerdictPlausible || !strings.Contains(findings[1].Rationale, "did not rule") {
+		t.Errorf("unjudged candidate must pass through as PLAUSIBLE, got %s / %q", findings[1].Verdict, findings[1].Rationale)
+	}
+}
+
+func TestGroupByLocation(t *testing.T) {
+	cands := []Candidate{
+		{File: "a.go", Line: 5, Angle: "A"},
+		{File: "a.go", Line: 5, Angle: "C"}, // same location → one group
+		{File: "a.go", Line: 9, Angle: "B"},
+		{File: "b.go", Line: 0, Angle: "cleanup"}, // file-level
+	}
+	groups := groupByLocation(cands)
+	if len(groups) != 3 {
+		t.Fatalf("want 3 location groups, got %d: %+v", len(groups), groups)
+	}
+	if len(groups[0]) != 2 {
+		t.Fatalf("a.go:5 should pool 2 candidates, got %d", len(groups[0]))
+	}
+}
+
+func TestCountConsensus(t *testing.T) {
+	cands := []Candidate{
+		{File: "a.go", Line: 5, Angle: "A"},
+		{File: "a.go", Line: 5, Angle: "C"}, // 2 distinct angles → consensus
+		{File: "a.go", Line: 9, Angle: "B"}, // lone
+		{File: "b.go", Line: 1, Angle: "D"},
+		{File: "b.go", Line: 1, Angle: "D"}, // same angle twice → not consensus
+	}
+	if got := countConsensus(cands); got != 1 {
+		t.Fatalf("want 1 consensus location, got %d", got)
+	}
+}
+
+func TestCanonicalizePath(t *testing.T) {
+	files := []string{"internal/store.go", "cmd/main.go"}
+	cases := map[string]string{
+		"internal/store.go": "internal/store.go", // exact
+		"store.go":          "internal/store.go", // suffix match
+		"restore.go":        "restore.go",        // NOT a segment suffix → unchanged
+		"other.go":          "other.go",          // no match → unchanged
+	}
+	for in, want := range cases {
+		if got := canonicalizePath(in, files); got != want {
+			t.Errorf("canonicalizePath(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
 
-func TestIsCheapEligible(t *testing.T) {
-	if isCheapEligible([]string{"A"}, 400) {
-		t.Fatal("bug angle A must never be cheap")
+func TestApplySynthesis_MergesByIndex(t *testing.T) {
+	ranked := []Finding{
+		{Candidate: Candidate{File: "a.go", Line: 5, Angle: "A", Severity: SevMajor}, Verdict: VerdictPlausible},
+		{Candidate: Candidate{File: "b.go", Line: 1, Angle: "B", Severity: SevMinor}, Verdict: VerdictConfirmed},
+		{Candidate: Candidate{File: "a.go", Line: 6, Angle: "C", Severity: SevCritical}, Verdict: VerdictConfirmed},
 	}
-	if isCheapEligible([]string{"E", "H"}, 400) {
-		t.Fatal("group containing H (guard sibling) must not be cheap")
+	// Merge index 2 (critical, confirmed) into primary 0.
+	out := applySynthesis(`{"findings":[{"primary":0,"merge":[2]},{"primary":1}]}`, ranked)
+	if len(out) != 2 {
+		t.Fatalf("want 2 findings, got %d", len(out))
 	}
-	if !isCheapEligible([]string{"F", "G"}, 400) {
-		t.Fatal("F,G on a small diff should be cheap-eligible")
+	if out[0].Severity != SevCritical {
+		t.Errorf("merged severity = %s, want CRITICAL", out[0].Severity)
 	}
-	if isCheapEligible([]string{"F", "G"}, 2000) {
-		t.Fatal("large diff must never be cheap")
+	if out[0].Verdict != VerdictConfirmed {
+		t.Errorf("merged verdict = %s, want CONFIRMED (escalated)", out[0].Verdict)
+	}
+	if out[0].Angle != "A,C" {
+		t.Errorf("merged angle = %q, want A,C", out[0].Angle)
+	}
+}
+
+func TestApplySynthesis_Unparseable(t *testing.T) {
+	if got := applySynthesis("not json", []Finding{{}}); got != nil {
+		t.Fatalf("unparseable synthesis must return nil for fallback, got %+v", got)
+	}
+}
+
+// TestApplySynthesis_OmittedIndicesSurvive guards the recall fix from the PR
+// review: a synthesis reply that decodes but mentions only some indices must
+// not drop the rest — they are appended in rank order.
+func TestApplySynthesis_OmittedIndicesSurvive(t *testing.T) {
+	ranked := []Finding{
+		{Candidate: Candidate{File: "a.go", Line: 1, Summary: "one"}, Verdict: VerdictConfirmed},
+		{Candidate: Candidate{File: "b.go", Line: 2, Summary: "two"}, Verdict: VerdictConfirmed},
+		{Candidate: Candidate{File: "c.go", Line: 3, Summary: "three"}, Verdict: VerdictPlausible},
+	}
+	out := applySynthesis(`{"findings":[{"primary":0}]}`, ranked)
+	if len(out) != 3 {
+		t.Fatalf("want all 3 findings (1 mentioned + 2 appended), got %d: %+v", len(out), out)
+	}
+	if out[1].Summary != "two" || out[2].Summary != "three" {
+		t.Fatalf("omitted findings must survive in rank order, got %+v", out)
 	}
 }
 

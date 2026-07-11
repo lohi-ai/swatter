@@ -35,8 +35,8 @@ type Config struct {
 	APIKey   string
 	BaseURL  string // openai-compat only
 
-	// Model tiers. Strong runs bug/security angles (A–D) and every angle on a
-	// large diff; Cheap may run E–G a tier down on a small diff (review-pr §2).
+	// Model tiers. Strong runs the correctness angles (A–E), the verifiers, and
+	// synthesis; Cheap runs the scope pass and the single cleanup finder.
 	ModelStrong string
 	ModelCheap  string
 

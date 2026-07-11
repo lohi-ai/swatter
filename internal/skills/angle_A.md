@@ -1,8 +1,8 @@
-# Angle A — line-by-line
+# Angle A — line-by-line diff scan
 
-Go through every hunk, every changed line. For each: what input, state,
-timing, or platform makes it wrong? Off-by-one, nil/undefined deref, wrong
-operator, unhandled error path, type coercion, boundary and empty-collection
-cases, integer/precision overflow, timezone/locale, concurrency races on
-shared state. Read the enclosing function for each hunk — a changed line can
-break an invariant an unchanged line downstream relies on.
+Read every hunk in the diff, line by line. Then Read the enclosing function for
+each hunk — bugs in unchanged lines of a touched function are in scope (the PR
+re-exposes or fails to fix them). For every line ask: what input, state, timing,
+or platform makes this line wrong? Look for inverted/wrong conditions,
+off-by-one, null/undefined deref, missing `await`, falsy-zero checks,
+wrong-variable copy-paste, error swallowed in catch, unescaped regex metachars.
