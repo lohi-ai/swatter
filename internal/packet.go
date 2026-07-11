@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 )
 
@@ -16,6 +17,7 @@ type Packet struct {
 	HeadRef      string
 	Diff         string
 	ChangedFiles []string
+	DeletedFiles []string // subset of ChangedFiles removed at head (no coverage)
 	ChangedLines int
 	PRTitle      string // untrusted author input
 	PRBody       string // untrusted author input
@@ -58,12 +60,26 @@ func BuildPacket(ctx context.Context, in PacketInput) (*Packet, error) {
 			files = append(files, l)
 		}
 	}
+	// Deletions still show up in --name-only; track them so test coverage is
+	// judged from files that survive at head — a deleted _test.go is removed
+	// coverage, not present coverage.
+	delOnly, err := git(ctx, in.RepoRoot, "diff", "--name-only", "--diff-filter=D", base+"..."+head)
+	if err != nil {
+		return nil, fmt.Errorf("git diff --diff-filter=D: %w", err)
+	}
+	var deleted []string
+	for _, l := range strings.Split(strings.TrimSpace(delOnly), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			deleted = append(deleted, l)
+		}
+	}
 
 	p := &Packet{
 		BaseRef:      base,
 		HeadRef:      head,
 		Diff:         diff,
 		ChangedFiles: files,
+		DeletedFiles: deleted,
 		ChangedLines: countChangedLines(diff),
 		PRTitle:      in.PRTitle,
 		PRBody:       in.PRBody,
@@ -130,6 +146,132 @@ func (p *Packet) buildBrief() string {
 	return b.String()
 }
 
+// DiffStat splits the unified diff into added and removed content-line counts.
+// It counts only lines inside a hunk (after an `@@` header, until the next
+// file's `diff --git`), so the `---`/`+++` file headers are never counted and,
+// crucially, a content line whose own text starts with `++`/`--` (rendered as
+// `+++`/`---` in the diff) is counted correctly rather than mistaken for a
+// header. Feeds the review summary's scope line.
+func (p *Packet) DiffStat() (added, removed int) {
+	inHunk := false
+	for _, l := range strings.Split(p.Diff, "\n") {
+		switch {
+		case strings.HasPrefix(l, "diff --git"):
+			inHunk = false // new file: headers follow until its first hunk
+		case strings.HasPrefix(l, "@@"):
+			inHunk = true
+		case !inHunk:
+			continue // pre-hunk region: file/index/--- /+++ headers
+		case strings.HasPrefix(l, "+"):
+			added++
+		case strings.HasPrefix(l, "-"):
+			removed++
+		}
+	}
+	return added, removed
+}
+
+// sensitiveAreas is the single source of truth for the money/auth/migration/
+// webhook classification, shared by isPriority (does a file touch one?) and
+// priorityAreas (which ones does a change touch?). Keeping one list stops the
+// two classifiers from drifting when a new sensitive term is added.
+var sensitiveAreas = []struct {
+	name string
+	kws  []string
+}{
+	{"money", []string{"payment", "billing", "money", "wallet"}},
+	{"auth", []string{"auth", "credential", "secret", "session", "token"}},
+	{"migration", []string{"migration", "migrate"}},
+	{"webhook", []string{"webhook"}},
+}
+
+// fileArea returns the sensitive-area name a file belongs to, or "" for none.
+// The single classifier both isPriority and priorityAreas are built on.
+func fileArea(f string) string {
+	l := strings.ToLower(f)
+	for _, a := range sensitiveAreas {
+		for _, kw := range a.kws {
+			if strings.Contains(l, kw) {
+				return a.name
+			}
+		}
+	}
+	return ""
+}
+
+// priorityAreas returns the distinct sensitive-area names a change touches
+// (e.g. "auth, migration"), sorted, so the scope line can name what a PR hit
+// rather than just that it hit "something priority".
+func priorityAreas(files []string) []string {
+	seen := map[string]bool{}
+	for _, f := range files {
+		if a := fileArea(f); a != "" {
+			seen[a] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for a := range seen {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// presentFiles returns the changed files that still exist at head — deletions
+// excluded. Test-coverage signals are judged from these so a deleted _test.go
+// file reads as removed coverage rather than counting as present coverage.
+func (p *Packet) presentFiles() []string {
+	if len(p.DeletedFiles) == 0 {
+		return p.ChangedFiles
+	}
+	gone := make(map[string]bool, len(p.DeletedFiles))
+	for _, f := range p.DeletedFiles {
+		gone[f] = true
+	}
+	out := make([]string, 0, len(p.ChangedFiles))
+	for _, f := range p.ChangedFiles {
+		if !gone[f] {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// countTests counts the changed files that are tests.
+func countTests(files []string) int {
+	n := 0
+	for _, f := range files {
+		if isTest(f) {
+			n++
+		}
+	}
+	return n
+}
+
+// hasProductionCode reports whether any changed file is real source — not a
+// test, lockfile, generated file, or prose doc. Used to decide whether "no
+// tests" is worth flagging on the scope line (a docs-only PR shouldn't be
+// nagged).
+func hasProductionCode(files []string) bool {
+	for _, f := range files {
+		if !isTest(f) && !isGeneratedOrLock(f) && !isDoc(f) {
+			return true
+		}
+	}
+	return false
+}
+
+// isDoc reports whether a file is prose/documentation rather than source.
+func isDoc(f string) bool {
+	l := strings.ToLower(f)
+	for _, ext := range []string{".md", ".markdown", ".rst", ".adoc", ".txt"} {
+		if strings.HasSuffix(l, ext) {
+			return true
+		}
+	}
+	return false
+}
+
 func countChangedLines(diff string) int {
 	n := 0
 	for _, l := range strings.Split(diff, "\n") {
@@ -162,14 +304,7 @@ func isGeneratedOrLock(f string) bool {
 }
 
 func isPriority(f string) bool {
-	l := strings.ToLower(f)
-	for _, kw := range []string{"payment", "billing", "auth", "migration", "migrate",
-		"credential", "secret", "session", "token", "webhook", "money", "wallet"} {
-		if strings.Contains(l, kw) {
-			return true
-		}
-	}
-	return false
+	return fileArea(f) != ""
 }
 
 // HeadSHA returns the current HEAD commit sha of the checkout, or "" on error.
