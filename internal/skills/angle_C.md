@@ -1,8 +1,6 @@
 # Angle C — cross-file tracer
 
-Check every caller and callee of the changed symbols (grep for the symbol
-names across the repo). A changed signature, return shape, error contract, or
-side effect must be honored at every call site. Wrappers must route to the
-wrapped instance (not back through a registry/global) and forward every method
-callers use. A changed data shape must be read consistently everywhere it is
-consumed. Flag any call site the diff left stale.
+For each function the diff changes, find its callers (Grep for the symbol) and
+check whether the change breaks any call site: a new precondition, a changed
+return shape, a new exception, a timing/ordering dependency. Also check callees:
+does a parallel change in the same PR make a call unsafe?

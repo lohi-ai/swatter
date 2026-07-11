@@ -10,22 +10,35 @@ import (
 	"github.com/lohi-ai/agentray/agentcore"
 )
 
+// Review profile — the reference's xhigh/max fan-out, run once per PR (Swatter
+// does one thorough pass, not a level-selectable review). Five correctness
+// angles A–E one agent each, plus one cleanup agent covering all five cleanup
+// lenses at a cap of cleanupLenses×perAngle so its budget matches five inline
+// agents while cutting four runs. Sweep always follows; the report caps at
+// maxFindings.
+const (
+	perAngle      = 8
+	cleanupLenses = 5
+	maxFindings   = 15
+	sweepMax      = 8
+)
+
 // ProgressFn receives phase progress notes so the reporter can update the
 // sticky comment. nil is fine (silent).
 type ProgressFn func(note string)
 
 // Result is the outcome of a full review.
 type Result struct {
-	Findings     []Finding
-	AngleCounts  map[string]int // angle letter → candidates emitted
-	Validated    int
-	Rejected     int
-	Consensus    int // candidates ≥2 finders agreed on
-	SweepRan     bool
-	SpentUSD     float64
-	SpentTokens  int
-	TrivialPass  string // non-empty = trivial early exit reason
-	// RejectedRuleIDs are rule ids cited by candidates the validator rejected —
+	Findings    []Finding
+	AngleCounts map[string]int // angle bucket → candidates emitted
+	Validated   int
+	Rejected    int
+	Consensus   int // locations ≥2 finders agreed on
+	SweepRan    bool
+	SpentUSD    float64
+	SpentTokens int
+	TrivialPass string // non-empty = trivial early exit reason
+	// RejectedRuleIDs are rule ids cited by candidates the verifier refuted —
 	// misses that decay the rule's confidence in the lifecycle pass.
 	RejectedRuleIDs []string
 	// Briefing is the optional LLM reviewer briefing (summary + walkthrough +
@@ -43,7 +56,7 @@ func (r Result) FiredRuleIDs() []string {
 	return out
 }
 
-// Pipeline drives the review-pr phases over one packet on agentcore.
+// Pipeline drives the review phases over one packet on agentcore.
 type Pipeline struct {
 	cfg      Config
 	deps     *runnerDeps
@@ -63,7 +76,8 @@ func NewPipeline(cfg Config, packet *Packet, budget *Budget, progress ProgressFn
 	return &Pipeline{cfg: cfg, deps: deps, packet: packet, progress: progress}, nil
 }
 
-// Run executes finders → validators → sweep and returns the validated findings.
+// Run executes the reference pipeline: Scope → Find → group-by-location Verify →
+// Sweep → Synthesize, and returns the ranked, capped findings.
 func (p *Pipeline) Run(ctx context.Context) (Result, error) {
 	res := Result{AngleCounts: map[string]int{}}
 
@@ -72,41 +86,46 @@ func (p *Pipeline) Run(ctx context.Context) (Result, error) {
 		return res, nil
 	}
 
-	// Phase 2 — finders (parallel, packed by diff size).
-	groups := packAngles(p.packet.ChangedLines)
-	p.progress(fmt.Sprintf("finders: %d runs over %d angles", len(groups), len(AllAngles)))
-	cands := p.runFinders(ctx, groups, &res)
+	// Phase 0 — Scope: a shared summary + the applicable CLAUDE.md conventions,
+	// pinned once so every finder does not re-derive them. Best-effort.
+	p.progress("scope: summarizing the change")
+	brief := p.briefWithScope(p.runScope(ctx))
 
-	deduped := DedupCandidates(cands)
-	for _, c := range deduped {
-		if strings.Contains(c.Angle, ",") {
-			res.Consensus++
-		}
+	// Phase 1 — Find: five correctness angles + one cleanup agent, in parallel.
+	p.progress(fmt.Sprintf("finders: %d correctness angles + cleanup", len(CorrectnessAngles)))
+	cands := p.runFinders(ctx, brief, &res)
+
+	// Canonicalize finder-returned paths against the changed-file list so grouping
+	// and reporting see one path per file, then record cross-angle consensus.
+	for i := range cands {
+		cands[i].File = canonicalizePath(cands[i].File, p.packet.ChangedFiles)
 	}
+	res.Consensus = countConsensus(cands)
 
-	// Phase 3 — validate CRITICAL/MAJOR; MINOR passes through as plausible.
-	var toValidate []Candidate
-	var findings []Finding
-	for _, c := range deduped {
-		if severityRank(c.Severity) >= severityRank(SevMajor) {
-			toValidate = append(toValidate, c)
-		} else {
-			findings = append(findings, Finding{Candidate: c, Verdict: VerdictPlausible,
-				Rationale: "MINOR — evident from the diff; not independently validated."})
-		}
-	}
-	p.progress(fmt.Sprintf("validators: %d candidates", len(toValidate)))
-	validated := p.runValidators(ctx, toValidate, &res)
-	findings = append(findings, validated...)
+	// Phase 2 — Verify: one verifier per file:line location, judging each pooled
+	// candidate independently.
+	p.progress(fmt.Sprintf("validators: %d locations", len(groupByLocation(cands))))
+	findings := p.runVerify(ctx, brief, cands, &res)
 
-	// Sweep — diff >500 lines or any confirmed CRITICAL.
-	if p.shouldSweep(p.packet.ChangedLines, findings) && !p.deps.budget.Exhausted() {
+	// Phase 3 — Sweep: a fresh finder with the verified list hunts only for gaps;
+	// its candidates re-enter the same per-location verify. Budget-gated.
+	if !p.deps.budget.Exhausted() {
 		res.SweepRan = true
 		p.progress("sweep: hunting for missed defects")
-		swept := p.runSweep(ctx, findings, &res)
-		findings = append(findings, swept...)
+		swept := p.runSweep(ctx, brief, findings, &res)
+		findings = append(findings, p.runVerify(ctx, brief, swept, &res)...)
 	}
 
+	// Merge survivors at one location into one finding, then rank.
+	findings = MergeFindings(findings)
+	SortFindings(findings)
+
+	// Phase 4 — Synthesize: merge same-root-cause findings across locations and
+	// cap. Falls back to the ranked, capped list if the pass yields nothing.
+	if len(findings) > 0 {
+		p.progress("synthesize: merging and ranking findings")
+		findings = p.runSynthesize(ctx, findings)
+	}
 	SortFindings(findings)
 	res.Findings = findings
 
@@ -124,23 +143,94 @@ func (p *Pipeline) Run(ctx context.Context) (Result, error) {
 	return res, nil
 }
 
-func (p *Pipeline) runFinders(ctx context.Context, groups [][]string, res *Result) []Candidate {
-	type out struct {
-		cands []Candidate
-		angle string
+// --- Phase 0: scope ---
+
+// scopeNote is what the scope agent pins: a one-paragraph change summary and the
+// applicable CLAUDE.md conventions, shared by every finder.
+type scopeNote struct {
+	Summary     string   `json:"summary"`
+	Conventions []string `json:"conventions"`
+}
+
+// runScope runs the scope agent. Best-effort: an empty note (error, budget, or
+// unparseable output) just means finders fall back to the deterministic brief.
+func (p *Pipeline) runScope(ctx context.Context) scopeNote {
+	if p.deps.budget.Exhausted() {
+		return scopeNote{}
 	}
-	ch := make(chan out, len(groups))
+	limits := agentcore.Limits{MaxTurns: 8, MaxToolCalls: 24, MaxToolResultLen: 24_000, MaxContextTokens: 160_000}
+	ag, err := p.deps.roleAgent(p.cfg.ModelCheap, ScopePrompt(), "", limits)
+	if err != nil {
+		return scopeNote{}
+	}
+	input := fmt.Sprintf("%s\n\n## Diff\n```diff\n%s\n```\n\nReturn the JSON object only.", p.packet.Brief, p.packet.Diff)
+	ctx = agentcore.WithTraceID(ctx, "scope")
+	r, err := p.deps.run(ctx, ag, input)
+	if err != nil {
+		return scopeNote{}
+	}
+	var s scopeNote
+	if body := extractJSONObject(r.Final); body != "" {
+		_ = json.Unmarshal([]byte(body), &s)
+	}
+	return s
+}
+
+// briefWithScope prepends the scope agent's summary and conventions to the
+// deterministic packet brief handed to every finder.
+func (p *Pipeline) briefWithScope(s scopeNote) string {
+	if strings.TrimSpace(s.Summary) == "" && len(s.Conventions) == 0 {
+		return p.packet.Brief
+	}
+	var b strings.Builder
+	b.WriteString(p.packet.Brief)
+	b.WriteString("\n## Scope\n")
+	if strings.TrimSpace(s.Summary) != "" {
+		fmt.Fprintf(&b, "%s\n", strings.TrimSpace(s.Summary))
+	}
+	if len(s.Conventions) > 0 {
+		b.WriteString("\nConventions in force:\n")
+		for _, c := range s.Conventions {
+			if c = strings.TrimSpace(c); c != "" {
+				fmt.Fprintf(&b, "- %s\n", c)
+			}
+		}
+	}
+	return b.String()
+}
+
+// --- Phase 1: finders ---
+
+func (p *Pipeline) runFinders(ctx context.Context, brief string, res *Result) []Candidate {
+	type job struct {
+		label   string
+		charter string
+		model   string
+		cap     int
+		clamp   bool
+	}
+	var jobs []job
+	for _, a := range CorrectnessAngles {
+		jobs = append(jobs, job{label: a, charter: AngleCharter(a), model: p.cfg.ModelStrong, cap: perAngle})
+	}
+	// One cleanup agent covers all five lenses; a cheaper tier and MINOR-clamped.
+	jobs = append(jobs, job{label: AngleCleanup, charter: CleanupCharter(), model: p.cfg.ModelCheap, cap: cleanupLenses * perAngle, clamp: true})
+
+	type out struct {
+		label string
+		cands []Candidate
+	}
+	ch := make(chan out, len(jobs))
 	var wg sync.WaitGroup
-	for _, group := range groups {
+	for _, j := range jobs {
 		if p.deps.budget.Exhausted() {
 			break
 		}
-		group := group
+		j := j
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			cands := p.runOneFinder(ctx, group)
-			ch <- out{cands: cands, angle: strings.Join(group, "")}
+			ch <- out{label: j.label, cands: p.runOneFinder(ctx, brief, j.label, j.charter, j.model, j.cap, j.clamp)}
 		}()
 	}
 	go func() { wg.Wait(); close(ch) }()
@@ -149,30 +239,58 @@ func (p *Pipeline) runFinders(ctx context.Context, groups [][]string, res *Resul
 	var mu sync.Mutex
 	for o := range ch {
 		mu.Lock()
-		for _, letter := range o.angle {
-			res.AngleCounts[string(letter)] += 0 // ensure key exists
-		}
-		for i := range o.cands {
-			// If a packed group produced a candidate, attribute to the group's
-			// first angle when the model didn't self-tag.
-			if o.cands[i].Angle == "" {
-				o.cands[i].Angle = string([]rune(o.angle)[0])
-			}
-			res.AngleCounts[o.cands[i].Angle]++
-		}
+		res.AngleCounts[o.label] += len(o.cands)
 		all = append(all, o.cands...)
 		mu.Unlock()
 	}
 	return all
 }
 
-// runOneFinder dispatches one finder run for a group of angles (usually one).
+func (p *Pipeline) runOneFinder(ctx context.Context, brief, label, charter, model string, cap int, clampMinor bool) []Candidate {
+	limits := agentcore.Limits{MaxTurns: 16, MaxToolCalls: 48, MaxToolResultLen: 24_000, MaxContextTokens: 200_000}
+	ag, err := p.deps.roleAgent(model, FinderPreamble(), charter, limits)
+	if err != nil {
+		return nil
+	}
+	input := fmt.Sprintf("%s\n\n## Diff\n```diff\n%s\n```\n\nYour angle: %s. Report up to %d candidates. Return the JSON array only.",
+		brief, p.packet.Diff, label, cap)
+	tag := "finder:" + label
+	ctx = agentcore.WithTraceID(ctx, tag)
+	r, err := p.deps.run(ctx, ag, input)
+	if err != nil {
+		return nil
+	}
+	cands, perr := ParseCandidates(r.Final)
+	if isTruncated(r.StopReason) && (perr != nil || len(cands) == 0) {
+		// The finder ran out of turns/tool calls before reporting; recover the
+		// angle with one toolless wrap-up turn instead of dropping it silently.
+		cands = p.wrapUpCandidates(ctx, tag, model, FinderPreamble(), charter, r)
+	} else if perr != nil {
+		return nil
+	}
+	cands = normalizeCandidateSeverities(cands)
+	for i := range cands {
+		cands[i].Angle = label
+		if clampMinor {
+			cands[i].Severity = SevMinor // cleanup findings never fail the build
+		}
+	}
+	return cands
+}
+
 // wrapupInstruction is the final, toolless turn we inject when a finder or sweep
 // hits its turn/tool ceiling before emitting JSON. agentcore truncates such a
-// run cleanly but leaves Final as the last (non-JSON) assistant text, so the
-// angle would otherwise be silently lost. We resume its transcript and ask it to
-// conclude from what it already read.
+// run cleanly but leaves Final
+// as the last (non-JSON) assistant text, so the angle would otherwise be
+// silently lost. We resume its transcript and ask it to conclude from what it
+// already read.
 const wrapupInstruction = "Stop exploring — you have reached your read budget for this pass. Do NOT ask for more tools. Using only what you have already read, output your final JSON array of candidates now. If nothing qualifies, return []. Return the JSON array only, no prose."
+
+// wrapupVerdictInstruction is the verdict analog of wrapupInstruction: the
+// toolless turn we inject when a verifier spends its whole read budget on tool
+// calls and never emits the verdict array. Without it a truncated verifier
+// yields no verdicts and its whole location falls back to unvalidated passthrough.
+const wrapupVerdictInstruction = "Stop exploring — you have reached your read budget for this pass. Do NOT ask for more tools. Using only what you have already read, output your final JSON array of verdicts now, one per candidate in order. Return the JSON array only, no prose."
 
 // isTruncated reports whether a run stopped because it hit a hard cap rather than
 // finishing — the states in which Final holds no final answer and a wrap-up turn
@@ -221,6 +339,31 @@ func (p *Pipeline) wrapUpCandidates(ctx context.Context, tag, model, soul, chart
 	return cands
 }
 
+// wrapUpVerdicts salvages a verifier that spent its whole read budget on tool
+// calls and never emitted the verdict array — the verdict analog of
+// wrapUpCandidates. It replays the run's transcript through a fresh, single-turn
+// toolless agent and parses whatever verdicts the model concludes with. Returns
+// nil when the run finished cleanly, the budget is spent, or nothing usable
+// comes back, so the caller keeps whatever verdicts it already parsed.
+func (p *Pipeline) wrapUpVerdicts(ctx context.Context, key string, r agentcore.RunResult) []verdictObj {
+	if !isTruncated(r.StopReason) || p.deps.budget.Exhausted() {
+		return nil
+	}
+	limits := agentcore.Limits{MaxTurns: 1, MaxToolCalls: 0, MaxToolResultLen: 24_000, MaxContextTokens: 200_000}
+	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, ValidatorPrompt(), "", limits)
+	if err != nil {
+		return nil
+	}
+	history := append(append([]agentcore.Message{}, r.Messages...),
+		agentcore.Message{Role: agentcore.RoleUser, Content: wrapupVerdictInstruction})
+	ctx = agentcore.WithTraceID(ctx, "validator:"+key+":wrapup")
+	rr, err := p.deps.runContinue(ctx, ag, history, wrapupVerdictInstruction)
+	if err != nil {
+		return nil
+	}
+	return parseVerdicts(rr.Final)
+}
+
 // normalizeCandidateSeverities defaults a missing severity to MINOR and canonicalizes
 // the rest — shared by the finder and its wrap-up path.
 func normalizeCandidateSeverities(cands []Candidate) []Candidate {
@@ -233,118 +376,140 @@ func normalizeCandidateSeverities(cands []Candidate) []Candidate {
 	return cands
 }
 
-func (p *Pipeline) runOneFinder(ctx context.Context, angles []string) []Candidate {
-	model := p.cfg.ModelStrong
-	if isCheapEligible(angles, p.packet.ChangedLines) {
-		model = p.cfg.ModelCheap
-	}
-	var charters strings.Builder
-	for _, a := range angles {
-		charters.WriteString(AngleCharter(a))
-		charters.WriteString("\n\n")
-	}
-	cap := lensCap(p.packet.ChangedLines)
-	limits := agentcore.Limits{MaxTurns: 16, MaxToolCalls: 48, MaxToolResultLen: 24_000, MaxContextTokens: 200_000}
+// --- Phase 2: group-by-location verify ---
 
-	ag, err := p.deps.roleAgent(model, FinderPreamble(), charters.String(), limits)
-	if err != nil {
-		return nil
+// runVerify groups candidates by file:line and runs one verifier per location,
+// each judging every pooled candidate at that location independently. Refuted
+// candidates are dropped (and their rule ids scored as misses); a candidate the
+// verifier does not rule on is dropped, never fabricated. When the budget is
+// spent, remaining candidates pass through as unvalidated PLAUSIBLE rather than
+// being lost.
+func (p *Pipeline) runVerify(ctx context.Context, brief string, cands []Candidate, res *Result) []Finding {
+	groups := groupByLocation(cands)
+	type out struct {
+		findings  []Finding
+		validated int
+		rejected  int
+		rejRules  []string
 	}
-	input := fmt.Sprintf("%s\n\n## Diff\n```diff\n%s\n```\n\nYour angle(s): %s. Report up to %d candidates per angle. Return the JSON array only.",
-		p.packet.Brief, p.packet.Diff, strings.Join(angles, ", "), cap)
-	tag := "finder:" + strings.Join(angles, "")
-	ctx = agentcore.WithTraceID(ctx, tag)
-	r, err := p.deps.run(ctx, ag, input)
-	if err != nil {
-		return nil
-	}
-	cands, perr := ParseCandidates(r.Final)
-	if isTruncated(r.StopReason) && (perr != nil || len(cands) == 0) {
-		// The finder ran out of turns/tool calls before reporting; recover the
-		// angle with one toolless wrap-up turn instead of dropping it silently.
-		cands = p.wrapUpCandidates(ctx, tag, model, FinderPreamble(), charters.String(), r)
-	} else if perr != nil {
-		return nil
-	}
-	return normalizeCandidateSeverities(cands)
-}
-
-func (p *Pipeline) runValidators(ctx context.Context, cands []Candidate, res *Result) []Finding {
-	ch := make(chan Finding, len(cands))
+	ch := make(chan out, len(groups))
 	var wg sync.WaitGroup
-	for _, c := range cands {
+	for _, g := range groups {
 		if p.deps.budget.Exhausted() {
-			// Budget gone: keep unvalidated CRITICAL/MAJOR as plausible rather
-			// than dropping them silently.
-			ch <- Finding{Candidate: c, Verdict: VerdictPlausible,
-				Rationale: "budget exhausted before validation — reported unvalidated."}
+			var fs []Finding
+			for _, c := range g {
+				fs = append(fs, Finding{Candidate: c, Verdict: VerdictPlausible,
+					Rationale: "budget exhausted before validation — reported unvalidated."})
+			}
+			ch <- out{findings: fs}
 			continue
 		}
-		c := c
+		g := g
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if f, ok := p.validateOne(ctx, c); ok {
-				ch <- f
-			} else {
-				ch <- Finding{Candidate: c, Verdict: VerdictReject}
-			}
+			f, v, rj, rr := p.verifyGroup(ctx, brief, g)
+			ch <- out{findings: f, validated: v, rejected: rj, rejRules: rr}
 		}()
 	}
 	go func() { wg.Wait(); close(ch) }()
 
-	var out []Finding
-	for f := range ch {
-		if f.Verdict == VerdictReject {
-			res.Rejected++
-			res.RejectedRuleIDs = append(res.RejectedRuleIDs, f.RuleIDs...)
+	var all []Finding
+	for o := range ch {
+		all = append(all, o.findings...)
+		res.Validated += o.validated
+		res.Rejected += o.rejected
+		res.RejectedRuleIDs = append(res.RejectedRuleIDs, o.rejRules...)
+	}
+	return all
+}
+
+// verifyGroup runs one verifier for a single file:line location over all pooled
+// candidates there, returning the surviving findings plus validated/rejected
+// counts. On a run or parse failure it keeps the candidates as unvalidated
+// PLAUSIBLE (recall-biased) rather than dropping real findings to an infra blip.
+func (p *Pipeline) verifyGroup(ctx context.Context, brief string, group []Candidate) (findings []Finding, validated, rejected int, rejRules []string) {
+	limits := agentcore.Limits{MaxTurns: 12, MaxToolCalls: 32, MaxToolResultLen: 24_000, MaxContextTokens: 160_000}
+	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, ValidatorPrompt(), "", limits)
+	if err != nil {
+		return passthrough(group), 0, 0, nil
+	}
+	cj, _ := json.Marshal(group)
+	input := fmt.Sprintf("%s\n\n## Candidates at `%s` (judge each, in order)\n```json\n%s\n```\n\nReturn the JSON array of verdicts only.",
+		brief, group[0].GroupKey(), string(cj))
+	ctx = agentcore.WithTraceID(ctx, "validator:"+group[0].GroupKey())
+	r, err := p.deps.run(ctx, ag, input)
+	if err != nil {
+		return passthrough(group), 0, 0, nil
+	}
+	verdicts := parseVerdicts(r.Final)
+	// A verifier that burned its turn/tool ceiling reading files never reaches the
+	// verdict array; salvage it with a toolless wrap-up turn before falling back to
+	// a blanket unvalidated passthrough for the whole location.
+	if len(verdicts) < len(group) {
+		if sv := p.wrapUpVerdicts(ctx, group[0].GroupKey(), r); len(sv) > len(verdicts) {
+			verdicts = sv
+		}
+	}
+	if len(verdicts) == 0 {
+		return passthrough(group), 0, 0, nil
+	}
+	for i, c := range group {
+		if i >= len(verdicts) {
+			// The verifier ruled on some but not all pooled candidates. Keep the
+			// unjudged remainder as unvalidated PLAUSIBLE rather than silently
+			// dropping real findings to a short verdict array.
+			findings = append(findings, Finding{Candidate: c, Verdict: VerdictPlausible,
+				Rationale: "verifier did not rule on this candidate — reported unvalidated."})
 			continue
 		}
-		res.Validated++
-		out = append(out, f)
+		v := verdicts[i]
+		switch v.Verdict {
+		case VerdictRefuted:
+			rejected++
+			rejRules = append(rejRules, c.RuleIDs...)
+		case VerdictConfirmed, VerdictPlausible:
+			f := Finding{Candidate: c, Verdict: v.Verdict, Rationale: v.Rationale}
+			if v.Severity != "" && !c.IsCleanup() {
+				f.Severity = ParseSeverity(string(v.Severity))
+			}
+			findings = append(findings, f)
+			validated++
+		default:
+			// A present-but-unrecognized verdict word is no clear decision; keep the
+			// candidate as unvalidated rather than fabricating a verdict or dropping it.
+			findings = append(findings, Finding{Candidate: c, Verdict: VerdictPlausible,
+				Rationale: "verifier returned no clear verdict — reported unvalidated."})
+		}
+	}
+	return findings, validated, rejected, rejRules
+}
+
+// passthrough keeps a location's candidates as unvalidated PLAUSIBLE findings —
+// used when a verifier run cannot produce a usable verdict, so a transient
+// failure never silently drops real findings.
+func passthrough(group []Candidate) []Finding {
+	out := make([]Finding, 0, len(group))
+	for _, c := range group {
+		out = append(out, Finding{Candidate: c, Verdict: VerdictPlausible,
+			Rationale: "verifier unavailable — reported unvalidated."})
 	}
 	return out
 }
 
-// validateOne runs an independent validator on a candidate. ok=false means
-// REJECT (or an unparseable/failed run, which we treat as a drop).
-func (p *Pipeline) validateOne(ctx context.Context, c Candidate) (Finding, bool) {
-	limits := agentcore.Limits{MaxTurns: 12, MaxToolCalls: 32, MaxToolResultLen: 24_000, MaxContextTokens: 160_000}
-	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, ValidatorPrompt(), "", limits)
-	if err != nil {
-		return Finding{}, false
-	}
-	cj, _ := json.Marshal(c)
-	input := fmt.Sprintf("%s\n\n## Candidate to validate\n```json\n%s\n```\n\nTrace it in the real code and return the JSON verdict object only.",
-		p.packet.Brief, string(cj))
-	ctx = agentcore.WithTraceID(ctx, "validator:"+findingLoc(Finding{Candidate: c}))
-	r, err := p.deps.run(ctx, ag, input)
-	if err != nil {
-		return Finding{}, false
-	}
-	v := parseVerdict(r.Final)
-	if v.Verdict == VerdictReject || v.Verdict == "" {
-		return Finding{}, false
-	}
-	f := Finding{Candidate: c, Verdict: v.Verdict, Rationale: v.Rationale}
-	if v.Severity != "" {
-		f.Severity = ParseSeverity(string(v.Severity))
-	}
-	return f, true
-}
+// --- Phase 3: sweep ---
 
-// runSweep runs one extra finder that gets the validated list and hunts only
-// for defects not already on it.
-func (p *Pipeline) runSweep(ctx context.Context, found []Finding, res *Result) []Finding {
+// runSweep runs one extra finder that gets the verified list and hunts only for
+// defects not already on it. Returns raw candidates for the caller to verify.
+func (p *Pipeline) runSweep(ctx context.Context, brief string, found []Finding, res *Result) []Candidate {
 	known, _ := json.Marshal(found)
-	charter := "# Sweep\n\nYou get the diff and the list of defects already found. Hunt ONLY for defects **not** already on that list — a fresh pass with different eyes. An empty result is a fine outcome; do not restate known findings."
 	limits := agentcore.Limits{MaxTurns: 16, MaxToolCalls: 48, MaxToolResultLen: 24_000, MaxContextTokens: 200_000}
-	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, FinderPreamble(), charter, limits)
+	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, FinderPreamble(), SweepCharter(), limits)
 	if err != nil {
 		return nil
 	}
-	input := fmt.Sprintf("%s\n\n## Diff\n```diff\n%s\n```\n\n## Already found (do not restate)\n```json\n%s\n```\n\nReturn the JSON array of NEW candidates only.",
-		p.packet.Brief, p.packet.Diff, string(known))
+	input := fmt.Sprintf("%s\n\n## Diff\n```diff\n%s\n```\n\n## Already found (do not restate)\n```json\n%s\n```\n\nSurface up to %d NEW candidates. Return the JSON array only.",
+		brief, p.packet.Diff, string(known), sweepMax)
 	ctx = agentcore.WithTraceID(ctx, "sweep")
 	r, err := p.deps.run(ctx, ag, input)
 	if err != nil {
@@ -352,76 +517,202 @@ func (p *Pipeline) runSweep(ctx context.Context, found []Finding, res *Result) [
 	}
 	cands, perr := ParseCandidates(r.Final)
 	if isTruncated(r.StopReason) && (perr != nil || len(cands) == 0) {
-		cands = p.wrapUpCandidates(ctx, "sweep", p.cfg.ModelStrong, FinderPreamble(), charter, r)
+		cands = p.wrapUpCandidates(ctx, "sweep", p.cfg.ModelStrong, FinderPreamble(), SweepCharter(), r)
 	} else if perr != nil {
 		return nil
 	}
-	// Sweep candidates are reported as plausible (single-pass, no validator).
+	cands = normalizeCandidateSeverities(cands)
+	for i := range cands {
+		cands[i].File = canonicalizePath(cands[i].File, p.packet.ChangedFiles)
+		cands[i].Angle = AngleSweep
+	}
+	res.AngleCounts[AngleSweep] += len(cands)
+	return cands
+}
+
+// --- Phase 4: synthesize ---
+
+// synthDecision is one entry of the synthesis agent's by-index output: keep
+// finding `Primary`, folding the `Merge` indices into it.
+type synthDecision struct {
+	Primary int   `json:"primary"`
+	Merge   []int `json:"merge"`
+}
+
+// runSynthesize merges same-root-cause findings across locations and caps the
+// result, working from the synthesis agent's by-index decisions. It falls back
+// to the ranked, capped input when the pass is skipped (budget) or yields
+// nothing usable.
+func (p *Pipeline) runSynthesize(ctx context.Context, ranked []Finding) []Finding {
+	if len(ranked) == 0 {
+		return ranked
+	}
+	if p.deps.budget.Exhausted() {
+		return capFindings(ranked, maxFindings)
+	}
+	// Toolless: the agent reorders/merges indices, it does not re-read files.
+	limits := agentcore.Limits{MaxTurns: 1, MaxToolCalls: 0, MaxToolResultLen: 16_000, MaxContextTokens: 160_000}
+	soul := strings.ReplaceAll(SynthesizePrompt(), "{{MAX}}", fmt.Sprintf("%d", maxFindings))
+	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, soul, "", limits)
+	if err != nil {
+		return capFindings(ranked, maxFindings)
+	}
+	rows := make([]map[string]any, len(ranked))
+	for i, f := range ranked {
+		rows[i] = map[string]any{
+			"index": i, "file": f.File, "line": f.Line,
+			"summary": f.Summary, "severity": f.Severity, "verdict": f.Verdict,
+		}
+	}
+	rj, _ := json.Marshal(rows)
+	input := fmt.Sprintf("## Verified findings (indexed, ranked)\n```json\n%s\n```\n\nReturn the JSON object only.", string(rj))
+	ctx = agentcore.WithTraceID(ctx, "synthesize")
+	r, err := p.deps.run(ctx, ag, input)
+	if err != nil {
+		return capFindings(ranked, maxFindings)
+	}
+	merged := applySynthesis(r.Final, ranked)
+	if len(merged) == 0 {
+		return capFindings(ranked, maxFindings)
+	}
+	return capFindings(merged, maxFindings)
+}
+
+// applySynthesis maps the synthesis agent's by-index decisions back onto the
+// ranked findings, folding merged members into their primary (verdict escalates
+// to CONFIRMED if any member was, severity to the max, angles/rules/rationale
+// unioned). Out-of-range or already-used indices are skipped. Returns nil when
+// the output is unparseable so the caller can fall back.
+func applySynthesis(raw string, ranked []Finding) []Finding {
+	body := extractJSONObject(raw)
+	if body == "" {
+		return nil
+	}
+	var decoded struct {
+		Findings []synthDecision `json:"findings"`
+	}
+	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+		return nil
+	}
+	used := make([]bool, len(ranked))
+	take := func(i int) (Finding, bool) {
+		if i < 0 || i >= len(ranked) || used[i] {
+			return Finding{}, false
+		}
+		used[i] = true
+		return ranked[i], true
+	}
 	var out []Finding
-	for _, c := range cands {
-		c.Angle = "sweep"
-		c.Severity = ParseSeverity(string(c.Severity))
-		out = append(out, Finding{Candidate: c, Verdict: VerdictPlausible,
-			Rationale: "found by sweep pass; not independently validated."})
+	for _, d := range decoded.Findings {
+		base, ok := take(d.Primary)
+		if !ok {
+			continue
+		}
+		for _, m := range d.Merge {
+			member, ok := take(m)
+			if !ok {
+				continue
+			}
+			base.Angle = mergeCSV(base.Angle, member.Angle)
+			base.RuleIDs = mergeStrings(base.RuleIDs, member.RuleIDs)
+			if severityRank(member.Severity) > severityRank(base.Severity) {
+				base.Severity = member.Severity
+			}
+			if member.Verdict == VerdictConfirmed {
+				base.Verdict = VerdictConfirmed
+			}
+			base.Rationale = joinRationale(base.Rationale, member.Rationale)
+		}
+		out = append(out, base)
 	}
 	return out
 }
 
-func (p *Pipeline) shouldSweep(lines int, found []Finding) bool {
-	if lines > 500 {
+// capFindings truncates a ranked list to at most n entries.
+func capFindings(f []Finding, n int) []Finding {
+	if len(f) <= n {
+		return f
+	}
+	return f[:n]
+}
+
+// --- grouping / paths / consensus ---
+
+// groupByLocation buckets candidates by file:line (file-level at line 0 shares a
+// bucket) in stable first-seen order, so each location gets exactly one verifier.
+func groupByLocation(cands []Candidate) [][]Candidate {
+	byKey := map[string][]Candidate{}
+	var order []string
+	for _, c := range cands {
+		k := c.GroupKey()
+		if _, ok := byKey[k]; !ok {
+			order = append(order, k)
+		}
+		byKey[k] = append(byKey[k], c)
+	}
+	out := make([][]Candidate, 0, len(order))
+	for _, k := range order {
+		out = append(out, byKey[k])
+	}
+	return out
+}
+
+// countConsensus counts the locations flagged by two or more distinct angles —
+// the cross-finder agreement surfaced in the review footer.
+func countConsensus(cands []Candidate) int {
+	angles := map[string]map[string]bool{}
+	for _, c := range cands {
+		k := c.GroupKey()
+		if angles[k] == nil {
+			angles[k] = map[string]bool{}
+		}
+		if a := strings.TrimSpace(c.Angle); a != "" {
+			angles[k][a] = true
+		}
+	}
+	n := 0
+	for _, set := range angles {
+		if len(set) >= 2 {
+			n++
+		}
+	}
+	return n
+}
+
+// canonicalizePath resolves a finder-returned path to a changed-file path by
+// longest suffix match, so "store.go" reported against "internal/store.go"
+// groups and reports under the one canonical path. Unmatched paths are returned
+// unchanged.
+func canonicalizePath(p string, files []string) string {
+	if p == "" {
+		return p
+	}
+	best := ""
+	for _, f := range files {
+		if f == p {
+			return f
+		}
+		if pathSuffixMatch(f, p) && len(f) > len(best) {
+			best = f
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return p
+}
+
+// pathSuffixMatch reports whether one path is a path-segment suffix of the other
+// ("store.go" matches "internal/store.go", but "restore.go" does not).
+func pathSuffixMatch(a, b string) bool {
+	long, short := a, b
+	if len(short) > len(long) {
+		long, short = short, long
+	}
+	if long == short {
 		return true
 	}
-	for _, f := range found {
-		if f.Severity == SevCritical && f.Verdict == VerdictConfirmed {
-			return true
-		}
-	}
-	return false
-}
-
-// --- packing ---
-
-// packAngles groups the eight angles into finder runs by diff size, per
-// review-pr Phase 2 packing rules. Large diffs run every angle alone; small
-// diffs pack them to save cost.
-func packAngles(changedLines int) [][]string {
-	switch {
-	case changedLines > 1500:
-		// Every angle rides alone.
-		out := make([][]string, 0, len(AllAngles))
-		for _, a := range AllAngles {
-			out = append(out, []string{a})
-		}
-		return out
-	case changedLines < 100:
-		// Tiny diff: pack into three runs — bugs together, security alone,
-		// cleanup/conformance together.
-		return [][]string{{"A", "B", "C"}, {"D"}, {"E", "F", "G", "H"}}
-	default:
-		// Normal: bug/security angles alone; H pairs with E, G shares.
-		return [][]string{{"A"}, {"B"}, {"C"}, {"D"}, {"E", "H"}, {"F", "G"}}
-	}
-}
-
-// lensCap is the per-lens candidate cap; larger diffs get a higher cap.
-func lensCap(changedLines int) int {
-	if changedLines > 1500 {
-		return 10
-	}
-	return 6
-}
-
-// isCheapEligible: E–G may run a tier down, but only on a small diff.
-func isCheapEligible(angles []string, changedLines int) bool {
-	if changedLines >= 1500 {
-		return false
-	}
-	for _, a := range angles {
-		if a == "A" || a == "B" || a == "C" || a == "D" || a == "H" {
-			return false
-		}
-	}
-	return true
+	return strings.HasSuffix(long, "/"+short)
 }
 
 // --- verdict parsing ---
@@ -432,23 +723,25 @@ type verdictObj struct {
 	Rationale string   `json:"rationale"`
 }
 
-func parseVerdict(raw string) verdictObj {
-	body := extractJSONObject(raw)
-	var v verdictObj
-	if body != "" {
-		_ = json.Unmarshal([]byte(body), &v)
+// parseVerdicts decodes the verifier's JSON array of per-candidate verdicts,
+// normalizing each verdict word (and tolerating the legacy REJECT spelling).
+func parseVerdicts(raw string) []verdictObj {
+	body := extractJSONArray(raw)
+	if body == "" {
+		return nil
 	}
-	v.Verdict = Verdict(strings.ToUpper(strings.TrimSpace(string(v.Verdict))))
-	switch v.Verdict {
-	case VerdictConfirmed, VerdictPlausible, VerdictReject:
-	default:
-		v.Verdict = ""
+	var vs []verdictObj
+	if err := json.Unmarshal([]byte(body), &vs); err != nil {
+		return nil
 	}
-	return v
+	for i := range vs {
+		vs[i].Verdict = ParseVerdict(string(vs[i].Verdict))
+	}
+	return vs
 }
 
 // extractJSONObject returns the outermost {...} span, ignoring braces in
-// strings — mirrors extractJSONArray for the validator's single object.
+// strings — mirrors extractJSONArray for the synthesis/scope objects.
 func extractJSONObject(s string) string {
 	start := strings.IndexByte(s, '{')
 	if start < 0 {

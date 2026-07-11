@@ -1,8 +1,8 @@
-# Angle E — cleanup (reuse / simplification / efficiency)
+# Angle E — wrapper/proxy correctness
 
-Name the existing helper the diff should have reused, the simpler form of the
-new logic, or the cheaper form of an expensive operation (an N+1 query, a
-repeated recomputation, an O(n²) loop over request data, an unbounded
-allocation). `failure_scenario` must state the **concrete cost** — the extra
-queries, the duplicated maintenance burden, the latency. These are MINOR at
-most; do not inflate them.
+When the PR adds or modifies a type that wraps another (cache, proxy, decorator,
+adapter): check that every method routes to the wrapped instance and not back
+through a registry/session/global — e.g. a caching provider holding a
+`delegate` field that resolves IDs via `session.get(...)` instead of
+`delegate.get(...)` will re-enter the cache or recurse. Also check that the
+wrapper forwards all the methods the callers actually use.

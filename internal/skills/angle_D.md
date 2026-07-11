@@ -1,8 +1,6 @@
-# Angle D — security & data
+# Angle D — language-pitfall specialist
 
-Hunt injection (SQL/shell/template/path), broken or missing authorization,
-secrets or PII in logs/responses/errors, unsafe migrations and backfills,
-destructive operations without a guard, and trusted use of client-supplied
-input. A field leaked across an API boundary counts **even if no UI renders
-it**. An unbounded query, a missing tenant filter, or a mass-assignment sink is
-in scope. Treat any user-reachable input as hostile and trace where it lands.
+Scan for the classic pitfalls of the diff's language/framework — for example:
+JS falsy-zero, `==` coercion, closure-captured loop var; Python mutable default
+args, late-binding closures; Go nil-map write, range-var capture; SQL injection;
+timezone/DST drift; float equality. Flag any instance the diff introduces.
