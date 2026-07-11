@@ -19,6 +19,36 @@ func TestDiffStat(t *testing.T) {
 	}
 }
 
+func TestDiffStatCountsPlusPlusContent(t *testing.T) {
+	// Content lines whose own text starts with ++/-- render as +++/--- inside the
+	// hunk; they are real changes, not headers, and must be counted.
+	p := &Packet{Diff: strings.Join([]string{
+		"diff --git a/opts.md b/opts.md",
+		"--- a/opts.md", "+++ b/opts.md",
+		"@@ -1,2 +1,2 @@",
+		"+++ option added", // content "++ option added"
+		"--- flag removed", // content "-- flag removed"
+		" untouched",
+	}, "\n")}
+	add, del := p.DiffStat()
+	if add != 1 || del != 1 {
+		t.Fatalf("DiffStat = (+%d −%d), want (+1 −1) — ++/-- content must count", add, del)
+	}
+}
+
+func TestDiffStatMultiFileHeadersNotCounted(t *testing.T) {
+	// Two files: each file's ---/+++ headers sit before its hunk and must not be
+	// counted, while both files' hunk content is.
+	p := &Packet{Diff: strings.Join([]string{
+		"diff --git a/a.go b/a.go", "--- a/a.go", "+++ b/a.go", "@@ -1 +1 @@", "+one",
+		"diff --git a/b.go b/b.go", "--- a/b.go", "+++ b/b.go", "@@ -1 +1 @@", "-two",
+	}, "\n")}
+	add, del := p.DiffStat()
+	if add != 1 || del != 1 {
+		t.Fatalf("DiffStat = (+%d −%d), want (+1 −1)", add, del)
+	}
+}
+
 func TestPriorityAreas(t *testing.T) {
 	got := priorityAreas([]string{"internal/auth/session.go", "db/migrations/003.sql", "README.md", "billing/charge.go"})
 	want := "auth, migration, money"
@@ -32,34 +62,42 @@ func TestAssessRiskLevels(t *testing.T) {
 		name    string
 		res     Result
 		files   []string
-		emoji   string
 		label   string
 		wantSub string // substring the reason must contain
 	}{
 		{"confirmed critical is high",
 			Result{Findings: []Finding{mkFinding("a.go", SevCritical, VerdictConfirmed)}},
-			[]string{"a.go"}, "🔴", "High", "before merge"},
+			[]string{"a.go"}, "High", "before merge"},
 		{"confirmed major is elevated",
 			Result{Findings: []Finding{mkFinding("a.go", SevMajor, VerdictConfirmed)}},
-			[]string{"a.go"}, "🟠", "Elevated", "confirmed"},
-		{"confirmed on sensitive path names it",
+			[]string{"a.go"}, "Elevated", "confirmed"},
+		{"confirmed on sensitive path names the real area",
 			Result{Findings: []Finding{mkFinding("auth/token.go", SevMajor, VerdictConfirmed)}},
-			[]string{"auth/token.go"}, "🟠", "Elevated", "money/auth/migration"},
+			[]string{"auth/token.go"}, "Elevated", "on the auth path"},
+		{"webhook finding is named webhook, not money/auth/migration",
+			Result{Findings: []Finding{mkFinding("webhook/stripe.go", SevMajor, VerdictConfirmed)}},
+			[]string{"webhook/stripe.go"}, "Elevated", "on the webhook path"},
+		{"confirmed non-sensitive is not tagged by an unconfirmed sensitive finding",
+			Result{Findings: []Finding{
+				mkFinding("internal/cache.go", SevMajor, VerdictConfirmed),
+				mkFinding("auth/token.go", SevMinor, VerdictPlausible),
+			}},
+			[]string{"internal/cache.go", "auth/token.go"}, "Elevated", "1 finding confirmed"},
 		{"only plausible is moderate",
 			Result{Findings: []Finding{mkFinding("a.go", SevMinor, VerdictPlausible)}},
-			[]string{"a.go"}, "🟡", "Moderate", "none confirmed"},
+			[]string{"a.go"}, "Moderate", "none confirmed"},
 		{"clean but sensitive nudges low",
 			Result{},
-			[]string{"auth/login.go"}, "🟢", "Low", "sensitive paths"},
+			[]string{"auth/login.go"}, "Low", "sensitive paths"},
 		{"clean is low",
 			Result{},
-			[]string{"README.md"}, "🟢", "Low", "no findings survived"},
+			[]string{"README.md"}, "Low", "no findings survived"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := assessRisk(tc.res, tc.files)
-			if r.emoji != tc.emoji || r.label != tc.label {
-				t.Fatalf("risk = %s %s, want %s %s", r.emoji, r.label, tc.emoji, tc.label)
+			if r.label != tc.label {
+				t.Fatalf("risk label = %q, want %q", r.label, tc.label)
 			}
 			if !strings.Contains(r.reason, tc.wantSub) {
 				t.Fatalf("reason %q missing %q", r.reason, tc.wantSub)
@@ -68,10 +106,22 @@ func TestAssessRiskLevels(t *testing.T) {
 	}
 }
 
+func TestAssessRiskConfirmedNonSensitiveOmitsPath(t *testing.T) {
+	// A confirmed finding off any sensitive path, alongside an unconfirmed one on
+	// a sensitive path, must NOT claim the confirmed finding is on that path.
+	r := assessRisk(Result{Findings: []Finding{
+		mkFinding("internal/cache.go", SevMajor, VerdictConfirmed),
+		mkFinding("auth/token.go", SevMinor, VerdictPlausible),
+	}}, []string{"internal/cache.go", "auth/token.go"})
+	if strings.Contains(r.reason, "on the") {
+		t.Fatalf("Elevated reason must not name a path for a non-sensitive confirmed finding: %q", r.reason)
+	}
+}
+
 func TestRenderScopeRiskScopeLine(t *testing.T) {
 	p := &Packet{
 		ChangedFiles: []string{"pkg/auth/login.go", "pkg/auth/login_test.go"},
-		Diff:         "+++ b/x\n+a\n+b\n-c\n",
+		Diff:         "--- a/x\n+++ b/x\n@@ -1 +1,2 @@\n+a\n+b\n-c\n",
 	}
 	out := renderScopeRisk(Result{}, p)
 	for _, want := range []string{"**Scope**", "2 files", "+2 −1", "touches auth", "1 test", "**Risk**"} {
@@ -135,7 +185,7 @@ func TestRenderSummaryCommentHasScopeAndRisk(t *testing.T) {
 	res := Result{Findings: []Finding{mkFinding("auth/token.go", SevMajor, VerdictConfirmed)}, AngleCounts: map[string]int{}}
 	p := &Packet{ChangedFiles: []string{"auth/token.go"}, Diff: "+++ b/x\n+a\n"}
 	out := RenderSummaryComment(res, p)
-	for _, want := range []string{"1 finding(s)", "**Scope**", "**Risk**", "🟠 Elevated", "ANGLES:"} {
+	for _, want := range []string{"1 finding(s)", "**Scope**", "**Risk**", "Elevated", "ANGLES:"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("summary comment missing %q in:\n%s", want, out)
 		}

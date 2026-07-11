@@ -3,6 +3,7 @@ package internal
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -184,7 +185,7 @@ func renderScopeRisk(res Result, p *Packet) string {
 	b.WriteString("\n")
 
 	r := assessRisk(res, p.ChangedFiles)
-	fmt.Fprintf(&b, "**Risk** · %s %s — %s\n", r.emoji, r.label, r.reason)
+	fmt.Fprintf(&b, "**Risk** · %s — %s\n", r.label, r.reason)
 
 	if focus := reviewFocus(res, p); focus != "" {
 		b.WriteString(focus)
@@ -240,20 +241,23 @@ func findingLoc(f Finding) string {
 	return f.File
 }
 
-// riskLevel is a one-glance verdict on a PR: an emoji, a label, and the reason
-// behind it, derived from finding severity/verdict crossed with what the PR
-// touches.
-type riskLevel struct{ emoji, label, reason string }
+// riskLevel is a one-glance verdict on a PR: a text label and the reason behind
+// it, derived from finding severity/verdict crossed with what the PR touches.
+type riskLevel struct{ label, reason string }
 
 // assessRisk grades the review. A confirmed CRITICAL is High (block); any other
-// confirmed finding is Elevated (escalated further if it lands on a sensitive
-// path); unconfirmed findings are Moderate; a clean review is Low — nudged up a
+// confirmed finding is Elevated (named by the sensitive path it lands on, if
+// any); unconfirmed findings are Moderate; a clean review is Low — nudged up a
 // note when it changed money/auth/migration paths without flagging anything.
+// Sensitive-path attribution is computed per verdict, so an Elevated reason
+// only names a path a *confirmed* finding actually sits on.
 func assessRisk(res Result, files []string) riskLevel {
-	var critConf, conf, onSensitive int
+	var critConf, conf int
+	confAreas := map[string]bool{}
+	allAreas := map[string]bool{}
 	for _, f := range res.Findings {
-		if isPriority(f.File) {
-			onSensitive++
+		if a := fileArea(f.File); a != "" {
+			allAreas[a] = true
 		}
 		if f.Verdict != VerdictConfirmed {
 			continue
@@ -262,28 +266,45 @@ func assessRisk(res Result, files []string) riskLevel {
 		if f.Severity == SevCritical {
 			critConf++
 		}
+		if a := fileArea(f.File); a != "" {
+			confAreas[a] = true
+		}
 	}
 	switch {
 	case critConf > 0:
-		return riskLevel{"🔴", "High",
+		return riskLevel{"High",
 			fmt.Sprintf("%s confirmed critical — needs a fix before merge", quantify(critConf, "finding"))}
 	case conf > 0:
 		reason := fmt.Sprintf("%s confirmed", quantify(conf, "finding"))
-		if onSensitive > 0 {
-			reason += " on a money/auth/migration path"
+		if a := joinAreas(confAreas); a != "" {
+			reason += " on the " + a + " path"
 		}
-		return riskLevel{"🟠", "Elevated", reason}
+		return riskLevel{"Elevated", reason}
 	case len(res.Findings) > 0:
 		reason := fmt.Sprintf("%s to weigh, none confirmed", quantify(len(res.Findings), "finding"))
-		if onSensitive > 0 {
-			reason += " (one on a sensitive path)"
+		if a := joinAreas(allAreas); a != "" {
+			reason += " (" + a + " path touched)"
 		}
-		return riskLevel{"🟡", "Moderate", reason}
+		return riskLevel{"Moderate", reason}
 	case len(priorityAreas(files)) > 0:
-		return riskLevel{"🟢", "Low", "clean, but it changed sensitive paths worth a human pass"}
+		return riskLevel{"Low", "clean, but it changed sensitive paths worth a human pass"}
 	default:
-		return riskLevel{"🟢", "Low", "no findings survived validation"}
+		return riskLevel{"Low", "no findings survived validation"}
 	}
+}
+
+// joinAreas renders a set of sensitive-area names as a sorted, comma-joined
+// string ("auth, webhook"), or "" when empty.
+func joinAreas(set map[string]bool) string {
+	if len(set) == 0 {
+		return ""
+	}
+	out := make([]string, 0, len(set))
+	for a := range set {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return strings.Join(out, ", ")
 }
 
 // quantify renders a count with a naive plural: 1 → "1 file", 3 → "3 files".
