@@ -177,7 +177,7 @@ func renderScopeRisk(res Result, p *Packet) string {
 	if areas := priorityAreas(p.ChangedFiles); len(areas) > 0 {
 		fmt.Fprintf(&b, " · touches %s", strings.Join(areas, ", "))
 	}
-	if t := countTests(p.ChangedFiles); t > 0 {
+	if t := countTests(p.presentFiles()); t > 0 {
 		fmt.Fprintf(&b, " · %s", quantify(t, "test"))
 	} else if hasProductionCode(p.ChangedFiles) {
 		b.WriteString(" · no tests")
@@ -216,7 +216,7 @@ func reviewFocus(res Result, p *Packet) string {
 		items = append(items, fmt.Sprintf("`%s` (confirmed %s)", findingLoc(f), strings.ToLower(string(f.Severity))))
 	}
 	// 2. A source change shipping no tests is a reviewer's classic ask.
-	if countTests(p.ChangedFiles) == 0 && hasProductionCode(p.ChangedFiles) {
+	if countTests(p.presentFiles()) == 0 && hasProductionCode(p.ChangedFiles) {
 		items = append(items, "no tests — ask for coverage")
 	}
 	// 3. Nothing confirmed but sensitive paths moved: steer a human pass.

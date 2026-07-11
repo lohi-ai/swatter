@@ -143,6 +143,20 @@ func TestRenderScopeRiskFlagsMissingTests(t *testing.T) {
 	if strings.Contains(renderScopeRisk(Result{}, docs), "no tests") {
 		t.Fatal("docs-only change should not be flagged for missing tests")
 	}
+	// A change that modifies source while *deleting* its test file must still be
+	// flagged: the deleted _test.go is removed coverage, not present coverage.
+	delTest := &Packet{
+		ChangedFiles: []string{"billing/charge.go", "billing/charge_test.go"},
+		DeletedFiles: []string{"billing/charge_test.go"},
+		Diff:         "+++ b/x\n+a\n",
+	}
+	out = renderScopeRisk(Result{}, delTest)
+	if !strings.Contains(out, "no tests") {
+		t.Fatalf("a deleted test file must not count as coverage:\n%s", out)
+	}
+	if strings.Contains(out, "1 test") {
+		t.Fatalf("deleted test file wrongly counted as present coverage:\n%s", out)
+	}
 }
 
 func TestReviewFocus(t *testing.T) {

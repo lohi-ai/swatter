@@ -17,6 +17,7 @@ type Packet struct {
 	HeadRef      string
 	Diff         string
 	ChangedFiles []string
+	DeletedFiles []string // subset of ChangedFiles removed at head (no coverage)
 	ChangedLines int
 	PRTitle      string // untrusted author input
 	PRBody       string // untrusted author input
@@ -59,12 +60,26 @@ func BuildPacket(ctx context.Context, in PacketInput) (*Packet, error) {
 			files = append(files, l)
 		}
 	}
+	// Deletions still show up in --name-only; track them so test coverage is
+	// judged from files that survive at head — a deleted _test.go is removed
+	// coverage, not present coverage.
+	delOnly, err := git(ctx, in.RepoRoot, "diff", "--name-only", "--diff-filter=D", base+"..."+head)
+	if err != nil {
+		return nil, fmt.Errorf("git diff --diff-filter=D: %w", err)
+	}
+	var deleted []string
+	for _, l := range strings.Split(strings.TrimSpace(delOnly), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			deleted = append(deleted, l)
+		}
+	}
 
 	p := &Packet{
 		BaseRef:      base,
 		HeadRef:      head,
 		Diff:         diff,
 		ChangedFiles: files,
+		DeletedFiles: deleted,
 		ChangedLines: countChangedLines(diff),
 		PRTitle:      in.PRTitle,
 		PRBody:       in.PRBody,
@@ -199,6 +214,26 @@ func priorityAreas(files []string) []string {
 		out = append(out, a)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// presentFiles returns the changed files that still exist at head — deletions
+// excluded. Test-coverage signals are judged from these so a deleted _test.go
+// file reads as removed coverage rather than counting as present coverage.
+func (p *Packet) presentFiles() []string {
+	if len(p.DeletedFiles) == 0 {
+		return p.ChangedFiles
+	}
+	gone := make(map[string]bool, len(p.DeletedFiles))
+	for _, f := range p.DeletedFiles {
+		gone[f] = true
+	}
+	out := make([]string, 0, len(p.ChangedFiles))
+	for _, f := range p.ChangedFiles {
+		if !gone[f] {
+			out = append(out, f)
+		}
+	}
 	return out
 }
 
