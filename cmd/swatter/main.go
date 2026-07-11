@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/lohi-ai/swatter/internal"
 )
@@ -40,11 +41,13 @@ func usage() {
 
 Usage:
   swatter run   [flags]  Review a PR / branch and report findings
-                         (on a merged pull_request "closed" event this runs
-                         the post-merge feedback/learn flow instead)
-  swatter learn [flags]  Learn from a merged PR's feedback: score rules from
+                         (on a merged pull_request "closed" event this computes
+                         the feedback/learn preview without committing)
+  swatter learn [flags]  Learn from merged-PR feedback: score rules from
                          reactions/replies/resolutions, record gap evidence,
-                         promote repeated patterns, commit the rule book
+                         promote repeated patterns, commit the rule book.
+                         --since 72h scans a window (the scheduled sole writer);
+                         --pr N backfills one PR.
   swatter init  [flags]  Scaffold the GitHub workflow + set the API-key secret
 
 Run flags:
@@ -57,8 +60,10 @@ Run flags:
 Learn flags:
   --github-event PATH  webhook payload (default: $GITHUB_EVENT_PATH)
   --repo-root PATH     checkout root (default: $SWATTER_REPO_ROOT or .)
-  --pr N               PR number (default: from event; required without one)
+  --pr N               PR number (default: from event; single-PR mode)
   --branch NAME        base branch the book is committed to (default: from event or main)
+  --since DURATION     batch mode: scan every PR merged in this lookback
+                       (Go duration, e.g. 72h; default $SWATTER_LEARN_SINCE)
 
 Config is read from SWATTER_* env (SWATTER_API_KEY required). See README.
 `)
@@ -99,12 +104,16 @@ func cmdRun(args []string) int {
 	ctx := context.Background()
 
 	// A pull_request `closed` event is not a review trigger: when the PR merged
-	// it runs the feedback/learn flow; a close-without-merge is a no-op.
+	// it computes the would-be rule-book update (compute-only — never commits)
+	// so the CI log carries a preview; a close-without-merge is a no-op. The
+	// durable write is the scheduled `swatter learn --since` batch, which is the
+	// sole writer of .swatter/{rules,pending}.md so concurrent merges never race.
 	if event != nil && event.Action == "closed" {
 		if !event.IsMergedClose() {
 			fmt.Fprintln(os.Stderr, "swatter: PR closed without merging — nothing to learn.")
 			return 0
 		}
+		cfg.RulesCommit = false // compute-only on merge; the daily batch commits
 		return runLearnFlow(ctx, cfg, event.PRNumber(), event.PullRequest.Base.Ref)
 	}
 
@@ -151,14 +160,20 @@ func cmdRun(args []string) int {
 	return internal.ExitCode(cfg, res)
 }
 
-// cmdLearn runs the feedback/learn flow directly (outside the run dispatch) —
-// for backfilling a merged PR by number, or from a `closed` event payload.
+// cmdLearn runs the feedback/learn flow. Two modes:
+//   - single PR: --pr N (or a `closed` event payload) — backfill one PR.
+//   - batch: --since DURATION (e.g. 72h) — the scheduled sole-writer job. It
+//     scans every PR merged in the window and folds each one's feedback in.
+//     The window is meant to overlap the previous run: per-PR scoring is
+//     idempotent (RuleStore.HasScored), so a missed nightly run self-heals and
+//     late-arriving reactions still get counted, without ever double-scoring.
 func cmdLearn(args []string) int {
 	fs := flag.NewFlagSet("learn", flag.ContinueOnError)
 	eventPath := fs.String("github-event", os.Getenv("GITHUB_EVENT_PATH"), "webhook payload path")
 	repoRoot := fs.String("repo-root", "", "checkout root")
 	pr := fs.Int("pr", 0, "PR number (default: from event)")
 	branch := fs.String("branch", "", "base branch (default: from event or main)")
+	since := fs.String("since", os.Getenv("SWATTER_LEARN_SINCE"), "batch mode: scan PRs merged within this lookback (Go duration, e.g. 72h)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -172,6 +187,16 @@ func cmdLearn(args []string) int {
 		cfg.RepoRoot = *repoRoot
 	}
 
+	// Batch mode wins when a window is given and no single PR is pinned.
+	if *since != "" && *pr == 0 {
+		dur, err := time.ParseDuration(*since)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "swatter learn: bad --since %q: %v\n", *since, err)
+			return 2
+		}
+		return runLearnBatch(context.Background(), cfg, dur)
+	}
+
 	if *eventPath != "" && (*pr == 0 || *branch == "") {
 		if event, err := internal.LoadEvent(*eventPath); err == nil {
 			if *pr == 0 {
@@ -183,13 +208,70 @@ func cmdLearn(args []string) int {
 		}
 	}
 	if *pr == 0 {
-		fmt.Fprintln(os.Stderr, "swatter learn: no PR number (pass --pr or --github-event)")
+		fmt.Fprintln(os.Stderr, "swatter learn: no PR number (pass --pr, --since, or --github-event)")
 		return 2
 	}
 	if *branch == "" {
 		*branch = "main"
 	}
 	return runLearnFlow(context.Background(), cfg, *pr, *branch)
+}
+
+// runLearnBatch is the scheduled sole-writer flow: enumerate every PR merged in
+// the lookback window and fold each one's feedback into the rule book. Base
+// branch comes per-PR from the merge, so a repo with several release branches
+// commits each PR's update to the branch it merged into. A single PR's failure
+// is logged and skipped — one unreadable PR must not sink the whole nightly run.
+func runLearnBatch(ctx context.Context, cfg internal.Config, window time.Duration) int {
+	gh, err := internal.NewGitHubClientFromEnv()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "swatter learn: github client: %v\n", err)
+		return 2
+	}
+	if gh == nil {
+		fmt.Fprintln(os.Stderr, "swatter learn: no GITHUB_TOKEN — cannot read PR feedback.")
+		return 2
+	}
+	since := time.Now().Add(-window)
+	prs, err := gh.ListMergedPRs(ctx, since)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "swatter learn: list merged PRs: %v\n", err)
+		return 1
+	}
+	fmt.Printf("swatter learn: %d PR(s) merged since %s\n", len(prs), since.Format("2006-01-02 15:04Z"))
+	progress := func(note string) { fmt.Fprintf(os.Stderr, "swatter learn: %s\n", note) }
+	return learnBatch(prs, func(pr int, branch string) error {
+		sum, err := internal.RunFeedback(ctx, cfg, gh, pr, branch, progress)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("swatter learn: PR #%d — %d signal(s): %d hit / %d miss, +%d obs, %d promoted, committed %v\n",
+			pr, sum.Signals, sum.Hits, sum.Misses, sum.ObsAdded, sum.RulesPromoted, sum.Committed)
+		return nil
+	})
+}
+
+// learnBatch applies process to every merged PR — defaulting a missing base ref
+// to main — and skips-and-counts per-PR failures so one unreadable PR can't sink
+// the nightly run. Returns 1 if any PR failed, 0 otherwise. Split out from
+// runLearnBatch so the orchestration is testable without the GitHub API.
+func learnBatch(prs []internal.MergedPR, process func(pr int, branch string) error) int {
+	failed := 0
+	for _, pr := range prs {
+		branch := pr.BaseRef
+		if branch == "" {
+			branch = "main"
+		}
+		if err := process(pr.Number, branch); err != nil {
+			fmt.Fprintf(os.Stderr, "swatter learn: PR #%d: %v\n", pr.Number, err)
+			failed++
+		}
+	}
+	if failed > 0 {
+		fmt.Fprintf(os.Stderr, "swatter learn: %d of %d PR(s) failed\n", failed, len(prs))
+		return 1
+	}
+	return 0
 }
 
 // runLearnFlow is the shared learn entrypoint for `run` (closed event) and

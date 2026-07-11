@@ -8,6 +8,19 @@ branding:
   color: red
 
 inputs:
+  mode:
+    description: >-
+      Subcommand: 'run' (default — review a PR) or 'learn' (post-merge feedback
+      → rule book). Use 'learn' from a scheduled workflow with learn_since set.
+    required: false
+    default: run
+  learn_since:
+    description: >-
+      learn mode only: scan every PR merged within this lookback window (Go
+      duration, e.g. 72h). Overlap the schedule interval — scoring is idempotent
+      per PR, so a missed run self-heals. Empty = single-PR mode (needs an event).
+    required: false
+    default: ''
   api_key:
     description: BYOK inference key (Anthropic key, or the gateway key for openai-compat). Store as a secret.
     required: true
@@ -85,8 +98,9 @@ runs:
   using: docker
   image: docker://ghcr.io/lohi-ai/swatter:v0
   args:
-    - run
+    - ${{ inputs.mode }}
   env:
+    SWATTER_LEARN_SINCE: ${{ inputs.learn_since }}
     SWATTER_API_KEY: ${{ inputs.api_key }}
     SWATTER_PROVIDER: ${{ inputs.provider }}
     SWATTER_BASE_URL: ${{ inputs.base_url }}

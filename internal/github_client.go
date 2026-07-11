@@ -300,6 +300,65 @@ func (c *GitHubClient) ThreadResolution(ctx context.Context, pr int) (map[int64]
 	return out, nil
 }
 
+// --- merged-PR enumeration (the scheduled learn batch) ---
+
+// MergedPR is the slice of a closed pull request the batch learn flow needs:
+// its number and the base branch its rule-book updates commit to.
+type MergedPR struct {
+	Number   int
+	BaseRef  string
+	MergedAt time.Time
+}
+
+// ListMergedPRs returns every PR merged at or after since, newest-merge first.
+// It walks the closed-PR list sorted by updated_at descending: a merged PR's
+// updated_at is always ≥ its merged_at, so once a page yields a PR updated
+// before the window every remaining PR is older too and we stop. A closed-but-
+// unmerged PR (merged_at == null) is skipped. The window is meant to overlap
+// prior runs — RunFeedback is idempotent per PR (RuleStore.HasScored), so a PR
+// seen twice is folded in once, which makes a missed nightly run self-heal.
+func (c *GitHubClient) ListMergedPRs(ctx context.Context, since time.Time) ([]MergedPR, error) {
+	var out []MergedPR
+	for page := 1; ; page++ {
+		var batch []struct {
+			Number    int     `json:"number"`
+			MergedAt  *string `json:"merged_at"`
+			UpdatedAt string  `json:"updated_at"`
+			Base      struct {
+				Ref string `json:"ref"`
+			} `json:"base"`
+		}
+		err := c.do(ctx, http.MethodGet,
+			fmt.Sprintf("/repos/%s/%s/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=%d",
+				c.owner, c.repo, page), nil, &batch)
+		if err != nil {
+			return nil, err
+		}
+		if len(batch) == 0 {
+			break
+		}
+		stop := false
+		for _, pr := range batch {
+			if upd, perr := time.Parse(time.RFC3339, pr.UpdatedAt); perr == nil && upd.Before(since) {
+				stop = true // sorted by updated desc — everything past here is older
+				break
+			}
+			if pr.MergedAt == nil {
+				continue // closed without merging
+			}
+			mergedAt, perr := time.Parse(time.RFC3339, *pr.MergedAt)
+			if perr != nil || mergedAt.Before(since) {
+				continue
+			}
+			out = append(out, MergedPR{Number: pr.Number, BaseRef: pr.Base.Ref, MergedAt: mergedAt})
+		}
+		if stop || len(batch) < 100 {
+			break
+		}
+	}
+	return out, nil
+}
+
 // --- repository contents (the rule-book committer) ---
 
 // ErrContentConflict marks a compare-and-swap failure on PutContent: the file

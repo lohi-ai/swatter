@@ -1,0 +1,43 @@
+name: swatter-learn
+# Post-merge learning, batched. Runs once a day and scans every PR merged in the
+# lookback window, folding human feedback (reactions, replies, resolved threads,
+# missed bugs) into .swatter/{rules,pending}.md. This scheduled job is the SOLE
+# writer of the rule book — a single writer means concurrent merges never race
+# on the file. The window overlaps the daily cadence (72h > 24h) so a skipped or
+# failed run self-heals: per-PR scoring is idempotent, so re-scanning a PR folds
+# its feedback in exactly once.
+on:
+  schedule:
+    - cron: '0 0 * * *' # 00:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      since:
+        description: Lookback window (Go duration, e.g. 72h)
+        required: false
+        default: '72h'
+
+# One learn run at a time: the sole-writer invariant holds even if a manual
+# dispatch overlaps the nightly cron. Don't cancel an in-flight run mid-commit.
+concurrency:
+  group: swatter-learn
+  cancel-in-progress: false
+
+permissions:
+  contents: write # commit the rule book to the base branch
+  pull-requests: read # read merged-PR comments + reactions
+
+jobs:
+  learn:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # path-gone rule expiry checks files against the checkout
+      - uses: lohi-ai/swatter@v0
+        with:
+          mode: learn
+          learn_since: ${{ github.event.inputs.since || '72h' }}
+          api_key: ${{ secrets.SWATTER_API_KEY }}
+          provider: openai-compat
+          base_url: https://ai.lohi2.com/v1
+          model: pro

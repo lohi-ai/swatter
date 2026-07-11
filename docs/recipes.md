@@ -12,8 +12,7 @@ Settings → Secrets → Actions).
 name: swatter
 on:
   pull_request:
-    # closed (merged) runs the post-merge feedback/learn flow, not a review
-    types: [opened, synchronize, reopened, closed]
+    types: [opened, synchronize, reopened]
 
 # Cancel a superseded (billed) review when a new commit is pushed.
 concurrency:
@@ -21,7 +20,7 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: write      # read the checkout + commit .swatter/rules.md post-merge
+  contents: read       # read the checkout to diff
   pull-requests: write # post comments
   checks: write        # post the check run
 
@@ -44,12 +43,54 @@ both refs present.
 
 ## Post-merge learning (the feedback loop)
 
-With `closed` in the trigger list above, every **merged** PR runs `swatter`'s
-learn flow instead of a review (GitHub has no dedicated merge event — `closed`
-plus the payload's `merged: true` is the standard pattern; a close without
-merge is a no-op). The flow reads the feedback humans left on Swatter's inline
-comments — 👍/👎 reactions, replies like "good catch" or "false positive",
-resolved threads, and whether the flagged line was changed before merge — and:
+Learning runs on a **schedule**, not per merge. A single daily job scans every
+PR merged in a lookback window and folds the feedback humans left on Swatter's
+inline comments — 👍/👎 reactions, replies like "good catch" or "false
+positive", resolved threads, and whether the flagged line was changed before
+merge — into the rule book. One scheduled job is the **sole writer** of
+`.swatter/{rules,pending}.md`, so concurrent merges can never race on the file.
+
+`.github/workflows/swatter-learn.yml`:
+
+```yaml
+name: swatter-learn
+on:
+  schedule:
+    - cron: '0 0 * * *'   # 00:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      since:
+        description: Lookback window (Go duration, e.g. 72h)
+        default: '72h'
+
+# One learn run at a time preserves the single-writer invariant.
+concurrency:
+  group: swatter-learn
+  cancel-in-progress: false
+
+permissions:
+  contents: write      # commit the rule book to the base branch
+  pull-requests: read  # read merged-PR comments + reactions
+
+jobs:
+  learn:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: lohi-ai/swatter@v1
+        with:
+          mode: learn
+          learn_since: ${{ github.event.inputs.since || '72h' }}
+          api_key: ${{ secrets.SWATTER_API_KEY }}
+          model: claude-opus-4-8
+```
+
+The window (`72h`) deliberately overlaps the daily cadence: per-PR scoring is
+idempotent, so a skipped or failed run self-heals on the next pass and
+late-arriving reactions still get counted — a PR is never double-scored. Each
+run:
 
 - scores the rule book: confirmed-useful findings are **hits**, findings
   humans rejected are **misses** (noisy rules decay fast);
@@ -59,11 +100,16 @@ resolved threads, and whether the flagged line was changed before merge — and:
   weight ≥ `rule_promote_after` (default 3; a missed bug weighs 2, a repeat 1)
   **across at least 2 distinct PRs**;
 - commits both files to the base branch via the Contents API (sha
-  compare-and-swap, so concurrent merges can't clobber each other) with
-  `[skip ci]`. Requires `contents: write`; set `rules_commit: 'false'` to
-  compute without committing.
+  compare-and-swap) with `[skip ci]`. Set `rules_commit: 'false'` to compute
+  without committing.
 
-Backfill an already-merged PR from a checkout: `swatter learn --pr 42`.
+Backfill one merged PR from a checkout: `swatter learn --pr 42`. Scan a window
+directly: `swatter learn --since 72h`.
+
+If you also want a per-merge *preview* (computed, never committed), add `closed`
+to the review workflow's `pull_request` types — a merged PR then logs the
+would-be rule-book change without writing it; the scheduled job remains the only
+writer.
 
 ## Bring-your-own gateway (9router / OpenRouter / LiteLLM / Ollama)
 

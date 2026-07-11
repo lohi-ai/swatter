@@ -66,12 +66,18 @@ book turns over rather than grows.
 ## Human feedback (post-merge learn flow)
 
 The lifecycle above scores rules with Swatter's own validator. The learn flow
-adds the human signal after a PR **merges** (`pull_request` `closed` event with
-`merged: true`):
+adds the human signal from **merged PRs**. It runs on a **daily schedule**
+(`swatter learn --since 72h`), not per merge: a single scheduled job scans every
+PR merged in the lookback window, which makes it the **sole writer** of the rule
+book so concurrent merges never race on the file. The window overlaps the daily
+cadence, and per-PR scoring is idempotent (`RuleStore.HasScored`), so a missed
+run self-heals and no PR is ever double-scored. (A merged `pull_request`
+`closed` event can still run the flow in *compute-only* mode for a per-merge
+preview — it never commits; the schedule is the only writer.) Per PR:
 
 1. **Read-back.** Every inline comment Swatter posts embeds an invisible
-   marker (`<!-- swatter:finding {"rule_ids":[…],"summary":…} -->`). After the
-   merge, Swatter lists the PR's review comments (+ reactions), resolves
+   marker (`<!-- swatter:finding {"rule_ids":[…],"summary":…} -->`). Swatter
+   lists the PR's review comments (+ reactions), resolves
    thread state via one GraphQL call, and classifies each of its threads:
    - *explicit*: 👍/👎 reactions and replies ("fixed", "good catch" vs
      "false positive", "not a bug"); net positive → **hit**, net negative →
@@ -99,8 +105,9 @@ adds the human signal after a PR **merges** (`pull_request` `closed` event with
 
 **During a review** committing races concurrent PRs on one path, so the
 in-review lifecycle stays suggestion-mode by default (`SWATTER_RULES_WRITE=1`
-to force a working-tree write). **Post-merge** is the safe write point: the
-learn flow commits `.swatter/{rules,pending}.md` to the base branch through
+to force a working-tree write). **The scheduled learn job** is the safe write
+point — as the sole writer it can commit without contending: it commits
+`.swatter/{rules,pending}.md` to the base branch through
 the GitHub **Contents API**, where every write carries the blob sha it read —
 a compare-and-swap. Two merges racing on the file leave the loser with a
 conflict; it refetches, re-applies its deltas onto the fresh content, and
