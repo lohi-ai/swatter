@@ -50,14 +50,27 @@ const (
 // PR comment. The briefing is generated from the untrusted PR diff/title/body, so
 // its text is treated as hostile: whitespace runs collapse to single spaces so a
 // field stays one bullet/line (no injected markdown structure), the field is
-// length-capped, and raw angle brackets are escaped last so injected
-// <details>/<summary> tags can't break the comment's fold and a "<!-- swatter:…"
-// string can't spoof our hidden sticky/finding markers. Ordinary markdown (bold,
-// code spans, lists we add ourselves) still renders — only raw HTML is defanged.
+// length-capped, and its active tokens are neutralized. Every substitution below
+// renders identically to the original character on GitHub, so ordinary prose is
+// visually untouched, but a prompt-injected payload can no longer act:
+//
+//   - < > escaped   → injected <details>/<summary> tags can't break the comment
+//     fold and a "<!-- swatter:…" string can't spoof our hidden markers.
+//   - [ escaped      → a [text](url) or [text][ref] Markdown link renders as
+//     literal text instead of a live (possibly phishing) link.
+//   - @ → &#64;      → an @mention renders as "@" but pings/notifies no one.
+//
+// Bare URLs are left as-is: they render as their full visible text, so a reviewer
+// sees exactly where they point (unlike a disguised [safe-looking](evil) link).
 func defangBriefText(s string, max int) string {
 	s = strings.Join(strings.Fields(s), " ")
 	s = truncate(s, max)
-	return strings.NewReplacer("<", "&lt;", ">", "&gt;").Replace(s)
+	return strings.NewReplacer(
+		"<", "&lt;",
+		">", "&gt;",
+		"[", "\\[",
+		"@", "&#64;",
+	).Replace(s)
 }
 
 // BriefReview runs one bounded, toolless LLM pass that turns the diff and the

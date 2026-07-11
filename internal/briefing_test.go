@@ -70,6 +70,31 @@ func TestSanitizeBriefingDefangsMarkupAndBounds(t *testing.T) {
 	}
 }
 
+func TestSanitizeBriefingNeutralizesLinksAndMentions(t *testing.T) {
+	// Prompt-injected phishing link + notification ping in the briefing text.
+	got := sanitizeBriefing(&Briefing{
+		Summary:     "totally safe [click here](https://evil.example) cc @maintainer @security-team",
+		Walkthrough: []string{"see [ref][1] and email admin@corp.example"},
+	})
+	if got == nil {
+		t.Fatal("briefing with content should not sanitize to nil")
+	}
+	// No live Markdown link survives: the '[' is escaped so '](url)' is inert text.
+	if strings.Contains(got.Summary, "](https://evil.example)") && !strings.Contains(got.Summary, "\\[") {
+		t.Fatalf("link not neutralized: %q", got.Summary)
+	}
+	if !strings.Contains(got.Summary, "\\[click here]") {
+		t.Fatalf("link bracket should be escaped: %q", got.Summary)
+	}
+	// No raw '@' survives → GitHub linkifies no mention/ping.
+	if strings.Contains(got.Summary, "@") || strings.Contains(got.Walkthrough[0], "@") {
+		t.Fatalf("mention '@' not neutralized: summary=%q walk=%q", got.Summary, got.Walkthrough[0])
+	}
+	if !strings.Contains(got.Summary, "&#64;maintainer") {
+		t.Fatalf("mention should render as entity: %q", got.Summary)
+	}
+}
+
 func TestSanitizeBriefingAllEmptyIsNil(t *testing.T) {
 	if got := sanitizeBriefing(&Briefing{Summary: "   ", Walkthrough: []string{" "}, Quiz: []QuizItem{{Q: "  "}}}); got != nil {
 		t.Fatalf("an all-empty briefing should sanitize to nil, got %+v", got)
