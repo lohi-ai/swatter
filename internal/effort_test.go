@@ -30,8 +30,16 @@ func TestEffortProfiles_LevelTable(t *testing.T) {
 	low, med, high := profile(EffortLow), profile(EffortMedium), profile(EffortHigh)
 	xhigh, max := profile(EffortXHigh), profile(EffortMax)
 
-	if len(low.Angles) != 1 || low.Cleanup || low.Verify || low.Sweep || low.Scope || low.Synthesize || low.MaxFindings != 4 {
-		t.Errorf("low must be one unverified diff pass capped at 4 findings, got %+v", low)
+	if len(low.Angles) != 1 || low.Cleanup || low.Verify || low.Sweep || low.Scope || low.Synthesize || low.Briefing || low.MaxFindings != 4 {
+		t.Errorf("low must be one unverified diff pass (no scope/verify/sweep/synthesize/briefing) capped at 4 findings, got %+v", low)
+	}
+	for _, tc := range []struct {
+		name string
+		p    EffortProfile
+	}{{"medium", med}, {"high", high}, {"xhigh", xhigh}, {"max", max}} {
+		if !tc.p.Briefing {
+			t.Errorf("%s must run the reviewer briefing, got %+v", tc.name, tc.p)
+		}
 	}
 	for _, tc := range []struct {
 		name string
@@ -114,6 +122,37 @@ func TestEffortProfiles_CapProvablyHolds(t *testing.T) {
 			if worst := at + 2*turnMax; worst > p.PerAgentTokens {
 				t.Errorf("%s/%s: worst-case spend %d exceeds per-agent cap %d", e, name, worst, p.PerAgentTokens)
 			}
+		}
+	}
+}
+
+// TestWrapUpLimits_CombinedCapHolds proves the salvage turn for a truncated run
+// can never push a logical agent (parent run + wrap-up run) over the per-agent
+// cap: for every parent spend, if the wrap-up runs its bounded turn plus the
+// parent stays within PerAgentTokens. It also checks the wrap-up is still
+// available at the spend where a finder realistically truncates (below its gate
+// threshold), so salvage is not silently disabled.
+func TestWrapUpLimits_CombinedCapHolds(t *testing.T) {
+	for _, e := range []Effort{EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax} {
+		p := profile(e)
+		for parent := 0; parent <= p.PerAgentTokens; parent += 1_000 {
+			lim, ok := p.wrapUpLimits(parent)
+			if !ok {
+				continue
+			}
+			turnMax := lim.MaxContextTokens + maxOutputTokens
+			if parent+turnMax > p.PerAgentTokens {
+				t.Errorf("%s: parent %d + wrap-up turn %d exceeds per-agent cap %d",
+					e, parent, turnMax, p.PerAgentTokens)
+			}
+		}
+		// A finder truncates (max_turns) only before its gate fires, i.e. at a
+		// spend at most the finder gate threshold plus one turn. The salvage must
+		// still be available there or truncated angles are dropped for nothing.
+		truncated := gateTokens(p.PerAgentTokens, p.Limits.Finder)
+		if _, ok := p.wrapUpLimits(truncated); !ok {
+			t.Errorf("%s: wrap-up unavailable at pre-gate finder spend %d — truncated angles would be dropped",
+				e, truncated)
 		}
 	}
 }

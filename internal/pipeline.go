@@ -97,7 +97,11 @@ func (p *Pipeline) Run(ctx context.Context) (Result, error) {
 
 	// Phase 1 — Find: the level's correctness angles (plus the cleanup agent on
 	// medium and up), in parallel.
-	p.progress(fmt.Sprintf("finders: %d correctness angles", len(prof.Angles)))
+	finderNote := fmt.Sprintf("finders: %d correctness angles", len(prof.Angles))
+	if prof.Cleanup {
+		finderNote += " + cleanup"
+	}
+	p.progress(finderNote)
 	cands := p.runFinders(ctx, brief, prof, &res)
 
 	// Canonicalize finder-returned paths against the changed-file list so grouping
@@ -152,7 +156,8 @@ func (p *Pipeline) Run(ctx context.Context) (Result, error) {
 	// Reviewer briefing — an LLM summary + walkthrough + quiz layered on top of
 	// the deterministic scope/risk lines. Best-effort and budget-gated: a failure
 	// or an exhausted budget just omits it, so the review never depends on it.
-	if p.cfg.Briefing && !p.deps.budget.Exhausted() {
+	// Low effort ("1 diff pass") skips the extra call regardless of the flag.
+	if prof.Briefing && p.cfg.Briefing && !p.deps.budget.Exhausted() {
 		p.progress("briefing: summarizing the change for the reviewer")
 		if b, err := p.deps.BriefReview(ctx, p.packet, findings); err == nil {
 			res.Briefing = b
@@ -341,7 +346,14 @@ func (p *Pipeline) wrapUpCandidates(ctx context.Context, tag, model, soul, chart
 	if !isTruncated(r.StopReason) || p.deps.budget.Exhausted() {
 		return nil
 	}
-	ag, err := p.deps.roleAgent(model, soul, charter, p.cfg.EffortProfile().Limits.WrapUp)
+	// The wrap-up is a fresh run with its own gate, so bound its context to the
+	// parent finder's remaining per-agent headroom — otherwise one logical angle
+	// (finder + wrap-up) could bill past the cap. Too little headroom drops it.
+	lim, ok := p.cfg.EffortProfile().wrapUpLimits(tokens(r.Usage))
+	if !ok {
+		return nil
+	}
+	ag, err := p.deps.roleAgent(model, soul, charter, lim)
 	if err != nil {
 		return nil
 	}
@@ -372,7 +384,13 @@ func (p *Pipeline) wrapUpVerdicts(ctx context.Context, key string, r agentcore.R
 	if !isTruncated(r.StopReason) || p.deps.budget.Exhausted() {
 		return nil
 	}
-	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, ValidatorPrompt(), "", p.cfg.EffortProfile().Limits.WrapUp)
+	// Bound the salvage turn to the parent verifier's remaining per-agent
+	// headroom so the location's verify (verifier + wrap-up) stays under the cap.
+	lim, ok := p.cfg.EffortProfile().wrapUpLimits(tokens(r.Usage))
+	if !ok {
+		return nil
+	}
+	ag, err := p.deps.roleAgent(p.cfg.ModelStrong, ValidatorPrompt(), "", lim)
 	if err != nil {
 		return nil
 	}

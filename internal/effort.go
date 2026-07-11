@@ -59,6 +59,7 @@ type EffortProfile struct {
 	Sweep         bool     // gap-hunting sweep after verify (xhigh/max)
 	Scope         bool     // LLM scope pre-pass (skipped at low)
 	Synthesize    bool     // LLM merge/rank pass (skipped at low)
+	Briefing      bool     // LLM reviewer briefing (skipped at low — "1 diff pass")
 	MaxFindings   int      // report cap
 	// ReasoningEffort is passed to providers with a thinking-effort knob (max
 	// only — the one thing that separates max from xhigh). Empty = provider default.
@@ -96,6 +97,7 @@ func (c Config) EffortProfile() EffortProfile {
 		return EffortProfile{
 			Angles: []string{"A", "B", "C"}, PerAngle: 6, Cleanup: true,
 			Verify: true, ConfirmedOnly: true, Scope: true, Synthesize: true,
+			Briefing:       true,
 			MaxFindings:    8,
 			PerAgentTokens: 72_000,
 			Limits: PhaseLimits{
@@ -115,6 +117,7 @@ func (c Config) EffortProfile() EffortProfile {
 		p := EffortProfile{
 			Angles: []string{"A", "B", "C", "D", "E"}, PerAngle: 8, Cleanup: true,
 			Verify: true, Sweep: true, Scope: true, Synthesize: true,
+			Briefing:       true,
 			MaxFindings:    15,
 			PerAgentTokens: 160_000,
 			Limits: PhaseLimits{
@@ -138,6 +141,7 @@ func (c Config) EffortProfile() EffortProfile {
 		return EffortProfile{
 			Angles: []string{"A", "B", "C"}, PerAngle: 6, Cleanup: true,
 			Verify: true, Scope: true, Synthesize: true,
+			Briefing:       true,
 			MaxFindings:    10,
 			PerAgentTokens: 110_000,
 			Limits: PhaseLimits{
@@ -169,4 +173,30 @@ func gateTokens(cap int, l agentcore.Limits) int {
 		return 0
 	}
 	return at
+}
+
+// wrapUpMinContext is the smallest context window in which a salvage turn can
+// still re-read enough of its transcript to conclude usefully. When the cap's
+// remaining headroom falls below it the wrap-up is skipped entirely.
+const wrapUpMinContext = 6_000
+
+// wrapUpLimits bounds the single toolless salvage turn for a truncated finder,
+// sweep, or verifier so the PARENT run's spend plus this wrap-up turn stays
+// under the per-agent cap. A finder gate only meters its own run, so without
+// this the parent's near-cap run plus a fresh wrap-up run could bill past
+// PerAgentTokens for one logical angle. The wrap-up turn bills at most
+// MaxContextTokens + maxOutputTokens, so shrinking its context to the cap's
+// remaining headroom keeps parent + wrap-up within the cap. Returns ok=false
+// when too little headroom remains for a useful turn — the caller then drops
+// the angle rather than exceed the cap.
+func (p EffortProfile) wrapUpLimits(parentSpent int) (agentcore.Limits, bool) {
+	lim := p.Limits.WrapUp
+	headroom := p.PerAgentTokens - parentSpent - maxOutputTokens
+	if headroom < wrapUpMinContext {
+		return lim, false
+	}
+	if headroom < lim.MaxContextTokens {
+		lim.MaxContextTokens = headroom
+	}
+	return lim, true
 }
