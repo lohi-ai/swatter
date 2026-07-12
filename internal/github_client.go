@@ -359,6 +359,37 @@ func (c *GitHubClient) ListMergedPRs(ctx context.Context, since time.Time) ([]Me
 	return out, nil
 }
 
+// PRRef carries the base branch, head sha, and PR title/body — the fields the
+// pull_request payload provides inline but an issue_comment payload omits. On
+// the `@swatter review` re-trigger the runtime fetches these so the packet
+// diffs against the right base and the reporter anchors to the current head.
+type PRRef struct {
+	BaseRef string
+	HeadSHA string
+	Title   string
+	Body    string
+}
+
+// GetPR fetches a single pull request's base/head refs and title/body.
+func (c *GitHubClient) GetPR(ctx context.Context, number int) (PRRef, error) {
+	var pr struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+		Head  struct {
+			SHA string `json:"sha"`
+		} `json:"head"`
+		Base struct {
+			Ref string `json:"ref"`
+		} `json:"base"`
+	}
+	err := c.do(ctx, http.MethodGet,
+		fmt.Sprintf("/repos/%s/%s/pulls/%d", c.owner, c.repo, number), nil, &pr)
+	if err != nil {
+		return PRRef{}, err
+	}
+	return PRRef{BaseRef: pr.Base.Ref, HeadSHA: pr.Head.SHA, Title: pr.Title, Body: pr.Body}, nil
+}
+
 // --- repository contents (the rule-book committer) ---
 
 // ErrContentConflict marks a compare-and-swap failure on PutContent: the file
