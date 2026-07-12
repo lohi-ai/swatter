@@ -34,3 +34,6 @@ jobs:
           provider: openai-compat
           base_url: https://ai.lohi2.com/v1
           model: pro
+          # PAT with pull-requests write, used only to resolve stale threads
+          # (GITHUB_TOKEN can't). Optional — resolve stays skipped while empty.
+          resolve_token: ${{ secrets.SWATTER_RESOLVE_TOKEN }}

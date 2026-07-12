@@ -25,6 +25,13 @@ type GitHubClient struct {
 	owner  string
 	repo   string
 	http   *http.Client
+
+	// resolveToken authenticates the resolveReviewThread mutation only. The
+	// default Actions GITHUB_TOKEN cannot resolve threads ("Resource not
+	// accessible by integration") even with pull-requests:write, so a PAT (or
+	// App token) with that right is supplied separately via SWATTER_RESOLVE_TOKEN.
+	// Empty means stale-thread resolution is skipped (dedup still works).
+	resolveToken string
 }
 
 // NewGitHubClientFromEnv builds a client from the Actions environment
@@ -41,14 +48,20 @@ func NewGitHubClientFromEnv() (*GitHubClient, error) {
 		return nil, fmt.Errorf("GITHUB_REPOSITORY %q is not owner/repo", full)
 	}
 	return &GitHubClient{
-		token:  token,
-		apiURL: envDefault("GITHUB_API_URL", "https://api.github.com"),
-		srvURL: envDefault("GITHUB_SERVER_URL", "https://github.com"),
-		owner:  owner,
-		repo:   repo,
-		http:   &http.Client{Timeout: 30 * time.Second},
+		token:        token,
+		apiURL:       envDefault("GITHUB_API_URL", "https://api.github.com"),
+		srvURL:       envDefault("GITHUB_SERVER_URL", "https://github.com"),
+		owner:        owner,
+		repo:         repo,
+		http:         &http.Client{Timeout: 30 * time.Second},
+		resolveToken: strings.TrimSpace(os.Getenv("SWATTER_RESOLVE_TOKEN")),
 	}, nil
 }
+
+// CanResolveThreads reports whether a resolve-capable token is configured. When
+// false the reporter skips the resolveReviewThread loop entirely rather than
+// firing calls the default GITHUB_TOKEN is known to reject.
+func (c *GitHubClient) CanResolveThreads() bool { return c.resolveToken != "" }
 
 // Permalink returns a browser URL to a file line at a commit sha.
 func (c *GitHubClient) Permalink(sha, path string, line int) string {
@@ -65,8 +78,14 @@ func (c *GitHubClient) do(ctx context.Context, method, path string, body any, ou
 }
 
 // doStatus is do plus the HTTP status code, for callers that must distinguish
-// specific failures (404 = absent file, 409/422 = contents sha conflict).
+// specific failures (404 = absent file, 409/422 = contents sha conflict). It
+// authenticates as the primary token; doStatusAs authenticates as a caller-
+// chosen token (the resolve PAT).
 func (c *GitHubClient) doStatus(ctx context.Context, method, path string, body any, out any) (int, error) {
+	return c.doStatusAs(ctx, c.token, method, path, body, out)
+}
+
+func (c *GitHubClient) doStatusAs(ctx context.Context, authToken, method, path string, body any, out any) (int, error) {
 	var rdr io.Reader
 	if body != nil {
 		b, err := json.Marshal(body)
@@ -79,7 +98,7 @@ func (c *GitHubClient) doStatus(ctx context.Context, method, path string, body a
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", "Bearer "+authToken)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	if body != nil {
@@ -415,11 +434,17 @@ func (c *GitHubClient) ReviewThreads(ctx context.Context, pr int) ([]ReviewThrea
 }
 
 // ResolveReviewThread marks a review thread resolved via GraphQL (no REST
-// equivalent). GraphQL reports authorization/argument failures in the response
-// body with a 200 status, so c.do would treat them as success — parse the
-// errors field so a permission denial surfaces to the caller as an error (the
-// reporter treats it as a best-effort skip, never a failed check run).
+// equivalent). It authenticates with resolveToken, not the primary token: the
+// default Actions GITHUB_TOKEN is rejected here even with pull-requests:write.
+// GraphQL reports authorization/argument failures in the response body with a
+// 200 status, so a bare do would treat them as success — parse the errors field
+// so a permission denial surfaces to the caller as an error (the reporter treats
+// it as a best-effort skip, never a failed check run).
 func (c *GitHubClient) ResolveReviewThread(ctx context.Context, threadID string) error {
+	tok := c.resolveToken
+	if tok == "" {
+		tok = c.token // defensive: callers gate on CanResolveThreads first
+	}
 	const m = `mutation($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}){ thread{ id } } }`
 	body := map[string]any{"query": m, "variables": map[string]any{"threadId": threadID}}
 	var res struct {
@@ -427,7 +452,7 @@ func (c *GitHubClient) ResolveReviewThread(ctx context.Context, threadID string)
 			Message string `json:"message"`
 		} `json:"errors"`
 	}
-	if err := c.do(ctx, http.MethodPost, "/graphql", body, &res); err != nil {
+	if _, err := c.doStatusAs(ctx, tok, http.MethodPost, "/graphql", body, &res); err != nil {
 		return err
 	}
 	if len(res.Errors) > 0 {
