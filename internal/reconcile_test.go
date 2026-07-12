@@ -32,6 +32,39 @@ func summaries(fs []Finding) []string {
 	return out
 }
 
+// TestReconcile_GraphQLBotLoginNoSuffix is the regression test for the live bug
+// the httptest simulation missed: GitHub's GraphQL API reports the bot author as
+// "github-actions" (no "[bot]"), while BotLogin defaults to the REST form
+// "github-actions[bot]". The thread must still be recognized as Swatter's —
+// otherwise nothing is deduped or resolved. A stale thread here must resolve,
+// and Swatter's own no-suffix participation must NOT read as human engagement.
+func TestReconcile_GraphQLBotLoginNoSuffix(t *testing.T) {
+	const (
+		graphQLBot = "github-actions"      // as reviewThreads(){author{login}} returns it
+		restBot    = "github-actions[bot]" // as cfg.BotLogin defaults
+	)
+	f := findingOf("a.go", "nil deref on x")
+	th := swatterThreadOf("T1", "a.go", "nil deref on x", false)
+	th.RootAuthor = graphQLBot             // GraphQL form on the thread
+	th.Participants = []string{graphQLBot} // only the bot participated
+
+	// Persistent finding: recognized as Swatter's despite the suffix mismatch → deduped.
+	post, resolve := reconcile([]Finding{f}, []ReviewThread{th}, restBot)
+	if len(post) != 0 {
+		t.Fatalf("persistent finding should dedup across the [bot]-suffix gap, got %v", summaries(post))
+	}
+	if len(resolve) != 0 {
+		t.Fatalf("persistent thread should not resolve, got %v", resolve)
+	}
+
+	// Stale finding (gone this round): the bot-only thread must resolve, not be
+	// mistaken for human-engaged via its no-suffix participant.
+	_, resolve = reconcile(nil, []ReviewThread{th}, restBot)
+	if !reflect.DeepEqual(resolve, []string{"T1"}) {
+		t.Fatalf("stale bot-only thread should resolve across the [bot]-suffix gap, got %v", resolve)
+	}
+}
+
 func TestReconcile_NewFindingPosts(t *testing.T) {
 	f := findingOf("a.go", "nil deref on x")
 	post, resolve := reconcile([]Finding{f}, nil, testBotLogin)

@@ -35,7 +35,7 @@ func reconcile(current []Finding, threads []ReviewThread, swatterLogin string) (
 			return findingMarker{}, false
 		}
 		m, ok := parseFindingMarker(t.RootBody)
-		if !ok || !strings.EqualFold(t.RootAuthor, swatterLogin) {
+		if !ok || !sameLogin(t.RootAuthor, swatterLogin) {
 			return findingMarker{}, false
 		}
 		return m, true
@@ -81,9 +81,28 @@ func reconcile(current []Finding, threads []ReviewThread, swatterLogin string) (
 // reacted to the thread.
 func threadHumanEngaged(t ReviewThread, swatterLogin string) bool {
 	for _, p := range t.Participants {
-		if p != "" && !strings.EqualFold(p, swatterLogin) {
+		if p != "" && !sameLogin(p, swatterLogin) {
 			return true
 		}
 	}
 	return false
+}
+
+// sameLogin compares two GitHub actor logins, tolerating the "[bot]" suffix
+// discrepancy between GitHub's APIs: the REST API reports a bot as
+// "github-actions[bot]" (the form BotLogin defaults to), while GraphQL — the
+// source of review-thread authors and participants — reports the same actor as
+// "github-actions", with no suffix. Without trimming it, Swatter never
+// recognizes its own GraphQL-sourced threads: the trust check fails (nothing
+// deduped or resolved) and its own participation reads as a human's (threads
+// left open). Comparison is case-insensitive, matching the call sites.
+func sameLogin(a, b string) bool {
+	return strings.EqualFold(trimBotSuffix(a), trimBotSuffix(b))
+}
+
+func trimBotSuffix(login string) string {
+	if len(login) >= 5 && strings.EqualFold(login[len(login)-5:], "[bot]") {
+		return login[:len(login)-5]
+	}
+	return login
 }
