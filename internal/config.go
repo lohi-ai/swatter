@@ -44,6 +44,8 @@ type Config struct {
 	// high | xhigh | max): the pipeline fan-out (angles, candidate caps, verify/
 	// sweep, findings cap) plus a hard per-agent token cap — high keeps every
 	// role agent under 120K tokens, medium and low under that. See EffortProfile.
+	// The default "auto" sizes the level from the diff at run time (resolveEffort
+	// in RunReview); an explicit value overrides it.
 	Effort Effort
 
 	// Budget backstops. MaxUSD uses agentcore pricing (known models only);
@@ -89,7 +91,7 @@ func LoadConfig() (Config, error) {
 		BaseURL:         os.Getenv("SWATTER_BASE_URL"),
 		ModelStrong:     os.Getenv("SWATTER_MODEL"),
 		ModelCheap:      os.Getenv("SWATTER_MODEL_CHEAP"),
-		Effort:          Effort(envDefault("SWATTER_EFFORT", string(EffortHigh))),
+		Effort:          Effort(envDefault("SWATTER_EFFORT", string(EffortAuto))),
 		MaxUSD:          envFloat("SWATTER_MAX_USD", 5.0),
 		MaxTokensTotal:  envInt("SWATTER_MAX_TOKENS_TOTAL", 8_000_000),
 		PricePerMTokIn:  envFloat("SWATTER_PRICE_PER_MTOK_IN", 0),
@@ -136,9 +138,9 @@ func (c Config) validate() error {
 		return fmt.Errorf("unknown fail_on %q (want critical | major | any | never)", c.FailOn)
 	}
 	switch c.Effort {
-	case EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax:
+	case EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax, EffortAuto:
 	default:
-		return fmt.Errorf("unknown effort %q (want low | medium | high | xhigh | max)", c.Effort)
+		return fmt.Errorf("unknown effort %q (want auto | low | medium | high | xhigh | max)", c.Effort)
 	}
 	return nil
 }

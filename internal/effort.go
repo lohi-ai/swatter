@@ -25,7 +25,39 @@ const (
 	EffortHigh   Effort = "high"
 	EffortXHigh  Effort = "xhigh"
 	EffortMax    Effort = "max"
+
+	// EffortAuto is not a pipeline level: it tells the run to size the level
+	// from the diff (see resolveEffort). It is resolved to a concrete level in
+	// RunReview before the pipeline sees it, so EffortProfile never runs on it.
+	EffortAuto Effort = "auto"
 )
+
+// resolveEffort picks a concrete level from the diff's size — the number of
+// changed files and total changed (± ) lines — when the configured effort is
+// EffortAuto. It uses the higher of the two dimensions so one large file or
+// many small files each lift the level; the thresholds are the "leaner"
+// (cheaper) tier so most PRs land at low/medium and only sprawling changes
+// reach xhigh:
+//
+//	≤3 files  AND ≤50 lines   → low
+//	≤10 files AND ≤300 lines  → medium
+//	≤25 files AND ≤1000 lines → high
+//	larger                    → xhigh
+//
+// max is never auto-selected — it only raises the provider reasoning effort at
+// the same fan-out as xhigh, a deliberate opt-in.
+func resolveEffort(files, lines int) Effort {
+	switch {
+	case files <= 3 && lines <= 50:
+		return EffortLow
+	case files <= 10 && lines <= 300:
+		return EffortMedium
+	case files <= 25 && lines <= 1000:
+		return EffortHigh
+	default:
+		return EffortXHigh
+	}
+}
 
 // maxOutputTokens is the per-completion cap roleAgent sets on every phase. It
 // is part of the per-agent budget math below, so the two must move together.

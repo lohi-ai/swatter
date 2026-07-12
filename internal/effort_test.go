@@ -199,11 +199,11 @@ func TestLoadConfig_Effort(t *testing.T) {
 
 	t.Setenv("SWATTER_EFFORT", "")
 	c, err := LoadConfig()
-	if err != nil || c.Effort != EffortHigh {
-		t.Fatalf("default effort = %q, err %v; want high", c.Effort, err)
+	if err != nil || c.Effort != EffortAuto {
+		t.Fatalf("default effort = %q, err %v; want auto", c.Effort, err)
 	}
 
-	for _, e := range []Effort{EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax} {
+	for _, e := range []Effort{EffortAuto, EffortLow, EffortMedium, EffortHigh, EffortXHigh, EffortMax} {
 		t.Setenv("SWATTER_EFFORT", string(e))
 		if c, err = LoadConfig(); err != nil || c.Effort != e {
 			t.Fatalf("effort %s = %q, err %v", e, c.Effort, err)

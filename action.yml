@@ -42,13 +42,15 @@ inputs:
     default: ''
   effort:
     description: >-
-      Review level: low (1 diff pass, no verify, ≤4 findings) | medium (3+5
-      angles × 6 → verify → ≤8, precision) | high (default — same fan-out,
-      recall-biased → ≤10) | xhigh (5+5 angles × 8 → verify → sweep → ≤15) |
-      max (xhigh + API reasoning effort). Each level also hard-caps every role
-      agent's tokens (high stays under 120K per agent).
+      Review level: auto (default — size the level from the diff: ≤3 files &
+      ≤50 lines → low, ≤10 & ≤300 → medium, ≤25 & ≤1000 → high, larger →
+      xhigh) | low (1 diff pass, no verify, ≤4 findings) | medium (3+5 angles ×
+      6 → verify → ≤8, precision) | high (same fan-out, recall-biased → ≤10) |
+      xhigh (5+5 angles × 8 → verify → sweep → ≤15) | max (xhigh + API
+      reasoning effort). Each level also hard-caps every role agent's tokens
+      (high stays under 120K per agent).
     required: false
-    default: high
+    default: auto
   fail_on:
     description: 'Check-run red threshold: never (default, advisory — green check + comments) | critical | major | any.'
     required: false
