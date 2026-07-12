@@ -29,28 +29,29 @@ bandaid. Special cases layered on shared infrastructure are a sign the fix
 isn't deep enough — prefer generalizing the underlying mechanism over adding
 special cases.
 
-### Conventions (CLAUDE.md + learned rules)
-The scope pass has already scanned the repo's CLAUDE.md files and quoted the
+### Conventions (AGENTS.md / CLAUDE.md + learned rules)
+The scope pass has already scanned the repo's convention docs and quoted the
 applicable rules under **Conventions in force** in your brief — enforce those;
-do not re-scan the repository for CLAUDE.md files yourself (only read one if a
+do not re-scan the repository for convention docs yourself (only read one if a
 quoted rule is ambiguous and you need its surrounding context). Check the diff
 for clear violations of the quoted rules. Only if the brief has **no**
 "Conventions in force" section (the scope pass failed) fall back to finding the
-CLAUDE.md files yourself: the repo-root CLAUDE.md plus any CLAUDE.md /
-CLAUDE.local.md in an ancestor directory of a changed file.
+convention docs yourself: in the repo root and in any ancestor directory of a
+changed file, the doc is AGENTS.md if present, otherwise CLAUDE.md /
+CLAUDE.local.md (when a directory has both, use only AGENTS.md).
 Also enforce the **learned rules** pasted in the brief — each is a pattern a
 past bug in this repo taught; a diff that violates one is a candidate. Only flag
 a violation when you can quote the exact rule and the exact line that breaks it
 — no style preferences, no vague "spirit of the doc" inferences. In the finding,
-name the CLAUDE.md path (or cite the rule id in `rule_ids`) and quote the rule
-so the report can cite it. If no CLAUDE.md and no learned rule applies, return
-nothing for this lens.
+name the convention-doc path (or cite the rule id in `rule_ids`) and quote the
+rule so the report can cite it. If no convention doc and no learned rule
+applies, return nothing for this lens.
 
 ---
 
 Cleanup, altitude, and conventions candidates use the same `file`/`line`/
 `summary` shape; in `failure_scenario`, state the concrete cost (what is
-duplicated, wasted, harder to maintain, or which CLAUDE.md rule / rule id is
-broken) instead of a crash. These are **MINOR** — correctness bugs always
+duplicated, wasted, harder to maintain, or which convention-doc rule / rule id
+is broken) instead of a crash. These are **MINOR** — correctness bugs always
 outrank cleanup, altitude, and conventions findings when the output cap forces
 a cut.
