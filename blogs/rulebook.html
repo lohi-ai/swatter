@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Swatter rule book — how it learns and stays ≤4 KB</title>
+<style>
+  /* ---- Swatter brand tokens (derived from the product; no external assets) ---- */
+  :root {
+    --bg:        #fbf9f6;
+    --surface:   #ffffff;
+    --surface-2: #f4f1ec;
+    --border:    #e5ded3;
+    --border-2:  #d8cfc0;
+    --ink:       #221d16;
+    --ink-2:     #5c5346;
+    --ink-3:     #857b6c;
+    --accent:    #c2410c;   /* swat amber-red */
+    --accent-2:  #9a3412;
+    --accent-bg: #fdeede;
+    --hit:       #15803d;   /* confirmed / confidence rises */
+    --hit-bg:    #e7f4ec;
+    --miss:      #b91c1c;   /* noise / decays fast */
+    --miss-bg:   #fbe9e9;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --radius: 14px;
+    --radius-sm: 9px;
+    --shadow: 0 1px 2px rgba(34,29,22,.05), 0 8px 28px -14px rgba(34,29,22,.18);
+    --maxw: 880px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg:        #17140f;
+      --surface:   #201c15;
+      --surface-2: #272219;
+      --border:    #362f24;
+      --border-2:  #453d2f;
+      --ink:       #f3ede2;
+      --ink-2:     #c3b9a6;
+      --ink-3:     #8f8471;
+      --accent:    #fb923c;
+      --accent-2:  #fdba74;
+      --accent-bg: #35220f;
+      --hit:       #4ade80;
+      --hit-bg:    #17301f;
+      --miss:      #f87171;
+      --miss-bg:   #351717;
+      --shadow: 0 1px 2px rgba(0,0,0,.3), 0 10px 30px -14px rgba(0,0,0,.6);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#17140f; --surface:#201c15; --surface-2:#272219; --border:#362f24; --border-2:#453d2f;
+    --ink:#f3ede2; --ink-2:#c3b9a6; --ink-3:#8f8471; --accent:#fb923c; --accent-2:#fdba74;
+    --accent-bg:#35220f; --hit:#4ade80; --hit-bg:#17301f; --miss:#f87171; --miss-bg:#351717;
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 10px 30px -14px rgba(0,0,0,.6);
+  }
+  :root[data-theme="light"] {
+    --bg:#fbf9f6; --surface:#ffffff; --surface-2:#f4f1ec; --border:#e5ded3; --border-2:#d8cfc0;
+    --ink:#221d16; --ink-2:#5c5346; --ink-3:#857b6c; --accent:#c2410c; --accent-2:#9a3412;
+    --accent-bg:#fdeede; --hit:#15803d; --hit-bg:#e7f4ec; --miss:#b91c1c; --miss-bg:#fbe9e9;
+    --shadow:0 1px 2px rgba(34,29,22,.05), 0 8px 28px -14px rgba(34,29,22,.18);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); line-height: 1.6;
+    -webkit-font-smoothing: antialiased; font-size: 17px;
+  }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 22px; }
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible {
+    outline: 3px solid var(--accent); outline-offset: 2px; border-radius: 6px;
+  }
+  code, .mono { font-family: var(--mono); font-size: .88em; }
+  p code, li code {
+    background: var(--surface-2); border: 1px solid var(--border);
+    padding: .05em .4em; border-radius: 6px; color: var(--ink);
+  }
+  h2 { font-size: clamp(1.35rem, 3.5vw, 1.7rem); letter-spacing: -.01em; margin: 0 0 .2em; }
+  h3 { font-size: 1.05rem; margin: 0 0 .35em; letter-spacing: -.005em; }
+  .sub { color: var(--ink-2); margin-top: 0; }
+
+  /* ---- Hero ---- */
+  header.hero {
+    background:
+      radial-gradient(120% 90% at 85% -10%, var(--accent-bg), transparent 60%),
+      var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+  .hero-inner { padding: 56px 0 44px; }
+  .badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--accent-bg); color: var(--accent-2);
+    border: 1px solid var(--border-2);
+    font-size: .8rem; font-weight: 600; letter-spacing: .02em;
+    padding: 5px 12px; border-radius: 100px; margin-bottom: 20px;
+  }
+  .hero h1 {
+    font-size: clamp(2rem, 6vw, 3rem); line-height: 1.08; letter-spacing: -.025em;
+    margin: 0 0 .4em; max-width: 15ch;
+  }
+  .hero h1 .hand { -webkit-text-fill-color: initial; }
+  .hero .lede { font-size: clamp(1.05rem, 2.6vw, 1.3rem); color: var(--ink-2); max-width: 52ch; margin: 0; }
+  .file-chip {
+    display: inline-flex; align-items: center; gap: 9px; margin-top: 26px;
+    background: var(--surface-2); border: 1px solid var(--border);
+    padding: 9px 14px; border-radius: var(--radius-sm);
+    font-family: var(--mono); font-size: .85rem; color: var(--ink);
+  }
+  .file-chip .cap {
+    margin-left: 4px; padding: 2px 8px; border-radius: 6px;
+    background: var(--accent); color: #fff; font-weight: 700; font-size: .78rem;
+  }
+  @media (prefers-color-scheme: dark){ .file-chip .cap{ color:#17140f; } }
+  :root[data-theme="dark"] .file-chip .cap{ color:#17140f; }
+  :root[data-theme="light"] .file-chip .cap{ color:#fff; }
+
+  section { padding: 46px 0; border-bottom: 1px solid var(--border); }
+  .eyebrow {
+    display:flex; align-items:center; gap:10px;
+    text-transform: uppercase; letter-spacing: .09em; font-size: .74rem;
+    font-weight: 700; color: var(--accent); margin: 0 0 12px;
+  }
+  .eyebrow svg { width: 17px; height: 17px; }
+
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow);
+  }
+  .pad { padding: 22px; }
+
+  /* ---- Flat-cost callout ---- */
+  .callout {
+    display: grid; grid-template-columns: 46px 1fr; gap: 16px; align-items: start;
+    background: var(--accent-bg); border: 1px solid var(--border-2);
+    border-radius: var(--radius); padding: 20px 22px;
+  }
+  .callout .ic {
+    width: 46px; height: 46px; border-radius: 12px; background: var(--accent);
+    display: grid; place-items: center;
+  }
+  .callout .ic svg { width: 26px; height: 26px; color: #fff; }
+  :root[data-theme="dark"] .callout .ic svg{ color:#17140f; }
+  @media (prefers-color-scheme: dark){ .callout .ic svg{ color:#17140f; } }
+  :root[data-theme="light"] .callout .ic svg{ color:#fff; }
+  .callout p { margin: .3em 0 0; color: var(--ink); }
+  .callout strong { color: var(--accent-2); }
+
+  /* ---- Annotated entry ---- */
+  .entry {
+    font-family: var(--mono); font-size: .84rem; line-height: 1.9;
+    background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 18px 20px; overflow-x: auto;
+  }
+  .entry .k { color: var(--accent-2); }
+  .entry .v { color: var(--ink); }
+  .entry mark {
+    background: transparent; color: inherit; position: relative;
+    border-bottom: 2px dotted var(--accent); padding-bottom: 1px; cursor: help;
+  }
+  .fieldgrid { display: grid; gap: 10px; margin-top: 20px; }
+  @media (min-width: 620px){ .fieldgrid { grid-template-columns: 1fr 1fr; } }
+  .field {
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 13px 15px; background: var(--surface);
+  }
+  .field .fn { font-family: var(--mono); font-size: .8rem; color: var(--accent-2); font-weight: 600; }
+  .field p { margin: 5px 0 0; font-size: .92rem; color: var(--ink-2); }
+
+  /* ---- Lifecycle loop ---- */
+  .loop { display: grid; gap: 14px; }
+  @media (min-width: 680px){ .loop { grid-template-columns: repeat(2, 1fr); } }
+  .step { position: relative; padding: 20px 20px 20px 22px; }
+  .step::before {
+    content:""; position:absolute; left:0; top:16px; bottom:16px; width:4px;
+    border-radius: 4px; background: var(--accent);
+  }
+  .step .n {
+    display:inline-grid; place-items:center; width:26px; height:26px; border-radius:8px;
+    background: var(--accent); color:#fff; font-weight:700; font-size:.85rem; margin-bottom:10px;
+  }
+  :root[data-theme="dark"] .step .n{ color:#17140f; }
+  @media (prefers-color-scheme: dark){ .step .n{ color:#17140f; } }
+  :root[data-theme="light"] .step .n{ color:#fff; }
+  .step p { margin: 6px 0 0; font-size: .95rem; color: var(--ink-2); }
+  .step.hit::before { background: var(--hit); }
+  .step.hit .n { background: var(--hit); }
+  .step.miss::before { background: var(--miss); }
+  .step.miss .n { background: var(--miss); }
+
+  /* ---- Size / eviction visual ---- */
+  .forces { display: grid; gap: 14px; margin-top: 8px; }
+  @media (min-width: 720px){ .forces { grid-template-columns: repeat(3, 1fr); } }
+  .force { padding: 18px; }
+  .force .ic { width: 34px; height: 34px; border-radius: 9px; display:grid; place-items:center; margin-bottom: 12px; }
+  .force .ic svg { width: 19px; height: 19px; }
+  .force.dedup .ic { background: var(--accent-bg); color: var(--accent-2); }
+  .force.score .ic { background: var(--hit-bg); color: var(--hit); }
+  .force.evict .ic { background: var(--miss-bg); color: var(--miss); }
+  .force p { margin: 4px 0 0; font-size: .9rem; color: var(--ink-2); }
+
+  .triggers { display: grid; gap: 12px; margin: 18px 0 6px; }
+  @media (min-width: 560px){ .triggers { grid-template-columns: 1fr 1fr; } }
+  .trigger {
+    display:flex; gap:13px; align-items:center; padding: 15px 17px;
+    border:1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface);
+  }
+  .trigger .big { font-family: var(--mono); font-weight: 700; font-size: 1.3rem; color: var(--accent); white-space: nowrap; }
+  .trigger span.t { font-size: .92rem; color: var(--ink-2); }
+
+  /* budget bar */
+  .budget { margin-top: 26px; }
+  .budget-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom: 8px; font-size:.85rem; color: var(--ink-2); }
+  .budget-head b { color: var(--ink); font-family: var(--mono); }
+  .ranklist { display:flex; flex-direction:column; gap:7px; }
+  .rrow { display:grid; grid-template-columns: 1fr auto; gap: 12px; align-items:center; }
+  .rbar { position: relative; height: 34px; border-radius: 8px; background: var(--surface-2); border:1px solid var(--border); overflow:hidden; }
+  .rbar .fill { position:absolute; inset:0 auto 0 0; border-radius: 7px 0 0 7px; }
+  .rbar .lbl { position: relative; z-index:1; display:flex; align-items:center; height:100%; padding: 0 12px; font-size:.8rem; font-family: var(--mono); color: var(--ink); }
+  .rrow .sc { font-family: var(--mono); font-size:.8rem; color: var(--ink-2); white-space:nowrap; }
+  .keep .fill { background: linear-gradient(90deg, var(--hit-bg), var(--hit-bg)); border-right:2px solid var(--hit); }
+  .weak .fill { background: var(--accent-bg); border-right:2px solid var(--accent); }
+  .cut { opacity:.55; }
+  .cut .rbar { border-style: dashed; }
+  .cut .fill { background: var(--miss-bg); border-right:2px solid var(--miss); }
+  .cutline {
+    display:flex; align-items:center; gap:10px; margin: 10px 0 4px;
+    color: var(--miss); font-size:.8rem; font-weight:600; letter-spacing:.02em;
+  }
+  .cutline .rule { flex:1; height:0; border-top: 2px dashed var(--miss); }
+  .tag { font-size:.68rem; font-weight:700; padding:2px 7px; border-radius:5px; letter-spacing:.03em; }
+  .tag.k { background: var(--hit-bg); color: var(--hit); }
+  .tag.e { background: var(--miss-bg); color: var(--miss); }
+
+  /* ---- Math panel ---- */
+  .math { display:grid; gap: 14px; }
+  @media (min-width: 640px){ .math { grid-template-columns: 1fr 1fr; } }
+  .formula { padding: 18px 20px; }
+  .formula.hitf { border-left: 4px solid var(--hit); }
+  .formula.missf { border-left: 4px solid var(--miss); }
+  .formula .eq { font-family: var(--mono); font-size: 1.02rem; color: var(--ink); margin: 4px 0 8px; }
+  .formula .eq .em { color: var(--hit); font-weight:700; }
+  .formula.missf .eq .em { color: var(--miss); }
+  .formula p { margin: 0; font-size: .9rem; color: var(--ink-2); }
+
+  footer { padding: 40px 0 64px; }
+  .links { display:flex; flex-wrap:wrap; gap: 12px; margin-top: 14px; }
+  .lnk {
+    display:inline-flex; align-items:center; gap:8px; text-decoration:none;
+    border:1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 10px 15px; color: var(--ink); background: var(--surface); font-size:.9rem; font-weight:500;
+    transition: border-color .15s ease, transform .15s ease;
+  }
+  .lnk:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .lnk svg { width: 16px; height: 16px; color: var(--accent); }
+  .foot-note { color: var(--ink-3); font-size:.82rem; margin-top: 26px; }
+  .lead-in { font-size: 1.05rem; color: var(--ink-2); max-width: 60ch; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap hero-inner">
+    <span class="badge">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg>
+      Swatter · living rule book
+    </span>
+    <h1><span class="hand">🤚</span> The rule book that learns your codebase — and never outgrows&nbsp;4&nbsp;KB</h1>
+    <p class="lede">A small, self-maintaining file of review rules. Confirmed bugs teach it; noise decays out of it; a hard byte budget keeps its cost flat, review after review.</p>
+    <div class="file-chip">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+      .swatter/rules.md
+      <span class="cap">≤ 4 KB</span>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<!-- WHY -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></svg>
+      The core idea
+    </p>
+    <h2>The whole book is pasted into every review — so its size <em>is</em> its cost</h2>
+    <p class="lead-in">On every PR, Swatter drops the entire rule book verbatim into each finder's brief. That is what makes learned rules cost nothing extra to enforce — and exactly why the file can never be allowed to grow without bound.</p>
+    <div style="margin-top:22px" class="callout">
+      <div class="ic" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg>
+      </div>
+      <div>
+        <h3 style="margin:0">Flat cost, not append-only growth</h3>
+        <p>An unbounded log of every rule ever learned would make each review a little more expensive than the last. Swatter instead keeps a <strong>fixed ~4 KB budget</strong> and lets the book <strong>turn over</strong> — bad rules leave as good ones arrive. The bot gets sharper while the per-review token cost stays flat.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ANATOMY -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg>
+      Anatomy of a rule
+    </p>
+    <h2>One rule is a generalized pattern a future diff could violate</h2>
+    <p class="lead-in">Not <em>“PR #42 forgot retry on line 88”</em> (a one-off fact, never stored) but the <em>class</em> of mistake. Each entry carries its own evidence for the lifecycle to act on.</p>
+
+    <div class="entry" style="margin-top:20px" role="img" aria-label="Example rule entry showing id, rule, origin, confidence, path, hits, last_hit and misses fields">
+<span class="k">- id:</span> <span class="v">r-2026-07-11-1</span>
+<span class="k">  rule:</span> <span class="v"><mark title="One sentence, actionable, general — the class of mistake">Wrap external API calls in the shared withRetry helper</mark></span>
+<span class="k">  origin:</span> <span class="v">PR#42 2026-07-11</span>   <span class="k">confidence:</span> <span class="v"><mark title="0–1. Rises on hits, falls fast on misses">0.90</mark></span>
+<span class="k">  path:</span> <span class="v"><mark title="If this file leaves the repo, the rule expires immediately">api/client.go</mark></span>
+<span class="k">  hits:</span> <span class="v"><mark title="Times the rule fired on a surviving finding">3</mark></span>   <span class="k">last_hit:</span> <span class="v">2026-07-10</span>   <span class="k">misses:</span> <span class="v"><mark title="Times the rule produced a rejected candidate">1</mark></span>
+    </div>
+
+    <div class="fieldgrid">
+      <div class="field"><span class="fn">rule</span><p>One actionable sentence — the general pattern, never the instance.</p></div>
+      <div class="field"><span class="fn">confidence</span><p>0–1 trust score. Rises slowly on hits, drops fast on misses.</p></div>
+      <div class="field"><span class="fn">path</span><p>File the rule is anchored to. If it leaves the repo, the rule expires.</p></div>
+      <div class="field"><span class="fn">hits / misses</span><p>Fired on a surviving finding vs. produced a rejected one.</p></div>
+      <div class="field"><span class="fn">last_hit</span><p>Recency — feeds the ~60-day decay used at eviction time.</p></div>
+      <div class="field"><span class="fn">origin</span><p>Where it was learned: the PR or branch and date.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- LIFECYCLE -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.6-6.4M21 3v6h-6"/></svg>
+      The lifecycle — run once after each review
+    </p>
+    <h2>Learn → Dedup → Score → Compact</h2>
+    <p class="lead-in">Four steps, in order, every review. Only the first adds; the other three are what keep the book honest and small.</p>
+
+    <div class="loop" style="margin-top:20px">
+      <div class="card step"><span class="n">1</span><h3>Learn</h3><p>Each <strong>CONFIRMED</strong> finding distills to at most one generalized candidate rule. No confirmed findings → nothing learned.</p></div>
+      <div class="card step"><span class="n">2</span><h3>Dedup</h3><p>Before inserting, a normalized-text match is a free reject; otherwise an LLM <em>same-pattern judge</em> catches paraphrase, generalization, and subset duplicates.</p></div>
+      <div class="card step hit"><span class="n">3</span><h3>Score</h3><p>Rule ids cited by a <strong>surviving</strong> finding gain a hit; ids behind a <strong>rejected</strong> candidate take a miss. Confidence moves accordingly.</p></div>
+      <div class="card step miss"><span class="n">4</span><h3>Compact / expire</h3><p>When over budget or every 20 reviews: drop dead-path rules, rank the rest by <em>confidence × recency</em>, and trim until the book fits 4 KB.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- SIZE -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M7 12h10M10 18h4"/></svg>
+      How it maintains the file size
+    </p>
+    <h2>Three forces hold the line at 4 KB</h2>
+    <p class="lead-in">Size isn't managed by one rule — it's the net of what's kept out, what decays, and what gets evicted under budget.</p>
+
+    <div class="forces">
+      <div class="card force dedup">
+        <div class="ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 9h10v10H9z"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/></svg></div>
+        <h3>1 · Dedup at the door</h3>
+        <p>Paraphrases and subsets never enter. Exact-match-only guards silently accumulate near-duplicates — the semantic judge is what stops slow bloat.</p>
+      </div>
+      <div class="card force score">
+        <div class="ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 6l-9.5 9.5-5-5L1 18"/><path d="M17 6h6v6"/></svg></div>
+        <h3>2 · Scoring sorts wheat from noise</h3>
+        <p>Hits nudge confidence up slowly; a single miss multiplies it by 0.7. Noise-making rules sink toward the eviction floor fastest.</p>
+      </div>
+      <div class="card force evict">
+        <div class="ic" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg></div>
+        <h3>3 · Compaction evicts under budget</h3>
+        <p>Dead-path rules go immediately; the rest are ranked and the lowest are trimmed until the rendered book fits 4 KB again.</p>
+      </div>
+    </div>
+
+    <h3 style="margin-top:34px">Two triggers start a compaction</h3>
+    <div class="triggers">
+      <div class="trigger">
+        <span class="big">&gt; 4 KB</span>
+        <span class="t">The rendered book exceeds the byte budget — compact now, whatever the review count.</span>
+      </div>
+      <div class="trigger">
+        <span class="big">Every 20</span>
+        <span class="t">…or a routine sweep every 20 reviews, so a book under budget still sheds stale rules.</span>
+      </div>
+    </div>
+
+    <div class="budget">
+      <h3 style="margin-top:30px">What eviction looks like</h3>
+      <p class="lead-in" style="margin-bottom:6px">Rules are sorted by <span class="mono">confidence × recency-decay</span> (~60-day half-life). Dead paths and sub-floor, never-hit rules drop first; then the tail is trimmed until the file fits.</p>
+      <div class="card pad" style="margin-top:16px">
+        <div class="budget-head"><span>ranked by effective score</span><span>budget: <b>4096 bytes</b></span></div>
+        <div class="ranklist">
+          <div class="rrow keep">
+            <div class="rbar"><div class="fill" style="width:92%"></div><span class="lbl">withRetry on external calls · <b>conf 0.90 · 3 hits</b></span></div>
+            <span class="sc"><span class="tag k">KEEP</span></span>
+          </div>
+          <div class="rrow keep">
+            <div class="rbar"><div class="fill" style="width:74%"></div><span class="lbl">validate slugs before DB write · conf 0.81 · 2 hits</span></div>
+            <span class="sc"><span class="tag k">KEEP</span></span>
+          </div>
+          <div class="rrow weak">
+            <div class="rbar"><div class="fill" style="width:46%"></div><span class="lbl">prefer context.WithTimeout · conf 0.55 · stale 70d</span></div>
+            <span class="sc">on the bubble</span>
+          </div>
+          <div class="cutline"><span>4 KB budget line</span><span class="rule"></span></div>
+          <div class="rrow cut">
+            <div class="rbar"><div class="fill" style="width:22%"></div><span class="lbl">guard nil map in cache.go · path deleted</span></div>
+            <span class="sc"><span class="tag e">EXPIRE</span></span>
+          </div>
+          <div class="rrow cut">
+            <div class="rbar"><div class="fill" style="width:11%"></div><span class="lbl">wrap logs in span · conf 0.13 · 0 hits · 2 misses</span></div>
+            <span class="sc"><span class="tag e">EVICT</span></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- MATH -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16M4 4l6 8-6 8h16"/></svg>
+      The scoring math
+    </p>
+    <h2>Trust is easy to lose, slow to earn</h2>
+    <p class="lead-in">The asymmetry is deliberate: a rule has to prove itself many times to climb, but one burst of noise sends it toward eviction.</p>
+
+    <div class="math" style="margin-top:20px">
+      <div class="card formula hitf">
+        <h3 style="color:var(--hit)">On a hit</h3>
+        <div class="eq">c += (1 − c) · <span class="em">0.1</span></div>
+        <p>Confidence eases toward 1 asymptotically — repeated confirmations raise it, but never in one jump. <span class="mono">last_hit</span> is stamped to today, resetting the recency clock.</p>
+      </div>
+      <div class="card formula missf">
+        <h3 style="color:var(--miss)">On a miss</h3>
+        <div class="eq">c · = <span class="em">0.7</span></div>
+        <p>A rejected candidate cuts confidence by 30% at once. Two or three misses drop a rule below the eviction floor, where the next compaction removes it.</p>
+      </div>
+    </div>
+
+    <div class="card pad" style="margin-top:16px; border-left:4px solid var(--accent)">
+      <h3>And recency decays the rest</h3>
+      <p style="margin:0; color:var(--ink-2)">At eviction time each rule's effective score is <span class="mono">confidence × 2^(−days_since_last_hit / 60)</span>. A high-confidence rule that stopped firing months ago ranks below a fresh one — so the book keeps favoring rules that are earning their place <em>now</em>.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <p class="eyebrow" style="color:var(--ink-3)">Read the source</p>
+    <h2 style="font-size:1.3rem">Go deeper</h2>
+    <div class="links">
+      <a class="lnk" href="../docs/DESIGN-RULEBOOK.md">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>
+        DESIGN-RULEBOOK.md — full spec
+      </a>
+      <a class="lnk" href="../internal/rules.go">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 18l6-6-6-6M8 6l-6 6 6 6"/></svg>
+        internal/rules.go — deterministic core
+      </a>
+      <a class="lnk" href="../README.md">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2zM22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+        Swatter README
+      </a>
+    </div>
+    <p class="foot-note">The same entry format and lifecycle are shared with babysit <span class="mono">review-pr</span> (<span class="mono">.babysit/review-pr.md</span>), so a rule learned in one is readable by the other.</p>
+  </div>
+</footer>
+
+</body>
+</html>
