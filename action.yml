@@ -98,6 +98,16 @@ inputs:
     description: Token for posting the check run + comments. Defaults to the workflow GITHUB_TOKEN.
     required: false
     default: ${{ github.token }}
+  resolve_token:
+    description: >-
+      Optional PAT (or App token) with pull-requests write used ONLY to resolve
+      stale review threads when a finding is fixed across review rounds. The
+      default GITHUB_TOKEN cannot resolve threads ("Resource not accessible by
+      integration"), so without this, fixed findings' threads stay open (dedup
+      of persistent findings still works). Pass a secret, e.g.
+      ${{ secrets.SWATTER_RESOLVE_TOKEN }}.
+    required: false
+    default: ''
 
 outputs:
   findings:
@@ -128,4 +138,5 @@ runs:
     SWATTER_RULE_PROMOTE_AFTER: ${{ inputs.rule_promote_after }}
     SWATTER_BOT_LOGIN: ${{ inputs.bot_login }}
     SWATTER_GITHUB_TOKEN: ${{ inputs.github_token }}
+    SWATTER_RESOLVE_TOKEN: ${{ inputs.resolve_token }}
     SWATTER_REPO_ROOT: /github/workspace

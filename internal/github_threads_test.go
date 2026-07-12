@@ -106,6 +106,39 @@ func TestResolveReviewThread_Success(t *testing.T) {
 	}
 }
 
+// TestResolveReviewThread_UsesResolveToken verifies the mutation authenticates
+// with resolveToken, not the primary token — the whole point of the separate
+// PAT, since the primary GITHUB_TOKEN is rejected by resolveReviewThread.
+func TestResolveReviewThread_UsesResolveToken(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		gotAuth = req.Header.Get("Authorization")
+		w.Write([]byte(`{"data":{"resolveReviewThread":{"thread":{"id":"THREAD_1"}}}}`))
+	}))
+	defer srv.Close()
+
+	c := &GitHubClient{apiURL: srv.URL, owner: "o", repo: "r", token: "primary", resolveToken: "pat", http: srv.Client()}
+	if err := c.ResolveReviewThread(context.Background(), "THREAD_1"); err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if gotAuth != "Bearer pat" {
+		t.Fatalf("resolve should authenticate with the PAT, got Authorization %q", gotAuth)
+	}
+}
+
+// TestCanResolveThreads gates the reporter's resolve loop: true only when a
+// resolve token is configured.
+func TestCanResolveThreads(t *testing.T) {
+	with := &GitHubClient{resolveToken: "pat"}
+	without := &GitHubClient{}
+	if !with.CanResolveThreads() {
+		t.Fatal("client with resolveToken should report CanResolveThreads() == true")
+	}
+	if without.CanResolveThreads() {
+		t.Fatal("client without resolveToken should report CanResolveThreads() == false")
+	}
+}
+
 func hasLogin(s []string, login string) bool {
 	return countLogin(s, login) > 0
 }
