@@ -3,6 +3,7 @@ package internal
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"unicode/utf8"
 )
@@ -82,8 +83,14 @@ func (r *Reporter) Finish(ctx context.Context, res Result, packet *Packet) error
 	var toResolve []string
 	if threads, err := r.gh.ReviewThreads(ctx, r.pr); err != nil {
 		r.Progress(fmt.Sprintf("thread reconcile skipped (%v) — posting all findings", err))
+		// Diagnostics go to stderr because Reporter.Progress only reaches the
+		// per-run sticky comment (overwritten by the final render), so a
+		// reconcile that silently no-ops leaves no trace in the Action log.
+		fmt.Fprintf(os.Stderr, "swatter: reconcile: ReviewThreads failed: %v — posting all %d finding(s)\n", err, len(res.Findings))
 	} else {
 		postSet, toResolve = reconcile(res.Findings, threads, r.cfg.BotLogin)
+		fmt.Fprintf(os.Stderr, "swatter: reconcile: %d thread(s) fetched, botLogin=%q, %d finding(s) → %d to post, %d to resolve\n",
+			len(threads), r.cfg.BotLogin, len(res.Findings), len(postSet), len(toResolve))
 	}
 
 	// Split the post-set into in-diff (inline comments) and out-of-diff
@@ -130,12 +137,16 @@ func (r *Reporter) Finish(ctx context.Context, res Result, packet *Packet) error
 	for _, id := range toResolve {
 		if err := r.gh.ResolveReviewThread(ctx, id); err != nil {
 			r.Progress(fmt.Sprintf("resolve stale thread failed (%v)", err))
+			fmt.Fprintf(os.Stderr, "swatter: reconcile: resolve thread %s failed: %v\n", id, err)
 			continue
 		}
 		resolved++
 	}
 	if resolved > 0 {
 		r.Progress(fmt.Sprintf("resolved %d stale comment thread(s)", resolved))
+	}
+	if len(toResolve) > 0 {
+		fmt.Fprintf(os.Stderr, "swatter: reconcile: resolved %d/%d stale thread(s)\n", resolved, len(toResolve))
 	}
 
 	// When the inline review didn't post, the in-diff findings have nowhere else
