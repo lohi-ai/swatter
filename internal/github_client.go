@@ -300,6 +300,142 @@ func (c *GitHubClient) ThreadResolution(ctx context.Context, pr int) (map[int64]
 	return out, nil
 }
 
+// --- review-thread reconcile (multi-round dedup + stale resolve) ---
+
+// ReviewThread is one PR review-comment thread as the reconciler needs it: the
+// GraphQL node id (the resolve mutation keys on it, not a comment databaseId),
+// resolution state, the root comment's author/body/path (identity + finding
+// marker), and the deduped logins of everyone who commented or reacted anywhere
+// in the thread, so a Swatter-only thread can be told from a human-engaged one.
+type ReviewThread struct {
+	ThreadID     string
+	IsResolved   bool
+	RootAuthor   string
+	RootBody     string
+	RootPath     string
+	Participants []string // every comment author + reaction user, deduped
+}
+
+// ReviewThreads fetches every review-comment thread on a PR with the metadata
+// the reconciler needs. It walks the reviewThreads cursor to the end (like
+// ThreadResolution) so threads aren't dropped on a large PR; per-thread comments
+// and reactions are capped, which only understates human-engagement on a
+// pathologically large thread. Best-effort: the caller falls back to posting
+// every finding when this errors.
+func (c *GitHubClient) ReviewThreads(ctx context.Context, pr int) ([]ReviewThread, error) {
+	const q = `query($owner:String!,$repo:String!,$pr:Int!,$cursor:String){
+  repository(owner:$owner,name:$repo){ pullRequest(number:$pr){
+    reviewThreads(first:100, after:$cursor){
+      pageInfo{ hasNextPage endCursor }
+      nodes{
+        id
+        isResolved
+        comments(first:100){ nodes{
+          author{ login }
+          body
+          path
+          reactions(first:20){ nodes{ user{ login } } }
+        } }
+      }
+    }
+  } } }`
+	var out []ReviewThread
+	var cursor *string
+	for {
+		body := map[string]any{
+			"query":     q,
+			"variables": map[string]any{"owner": c.owner, "repo": c.repo, "pr": pr, "cursor": cursor},
+		}
+		var res struct {
+			Data struct {
+				Repository struct {
+					PullRequest struct {
+						ReviewThreads struct {
+							PageInfo struct {
+								HasNextPage bool   `json:"hasNextPage"`
+								EndCursor   string `json:"endCursor"`
+							} `json:"pageInfo"`
+							Nodes []struct {
+								ID         string `json:"id"`
+								IsResolved bool   `json:"isResolved"`
+								Comments   struct {
+									Nodes []struct {
+										Author struct {
+											Login string `json:"login"`
+										} `json:"author"`
+										Body      string `json:"body"`
+										Path      string `json:"path"`
+										Reactions struct {
+											Nodes []struct {
+												User struct {
+													Login string `json:"login"`
+												} `json:"user"`
+											} `json:"nodes"`
+										} `json:"reactions"`
+									} `json:"nodes"`
+								} `json:"comments"`
+							} `json:"nodes"`
+						} `json:"reviewThreads"`
+					} `json:"pullRequest"`
+				} `json:"repository"`
+			} `json:"data"`
+		}
+		if err := c.do(ctx, http.MethodPost, "/graphql", body, &res); err != nil {
+			return nil, err
+		}
+		for _, th := range res.Data.Repository.PullRequest.ReviewThreads.Nodes {
+			t := ReviewThread{ThreadID: th.ID, IsResolved: th.IsResolved}
+			seen := map[string]bool{}
+			addParticipant := func(login string) {
+				if login == "" || seen[login] {
+					return
+				}
+				seen[login] = true
+				t.Participants = append(t.Participants, login)
+			}
+			for i, cm := range th.Comments.Nodes {
+				if i == 0 {
+					t.RootAuthor, t.RootBody, t.RootPath = cm.Author.Login, cm.Body, cm.Path
+				}
+				addParticipant(cm.Author.Login)
+				for _, rx := range cm.Reactions.Nodes {
+					addParticipant(rx.User.Login)
+				}
+			}
+			out = append(out, t)
+		}
+		page := res.Data.Repository.PullRequest.ReviewThreads.PageInfo
+		if !page.HasNextPage || page.EndCursor == "" {
+			break
+		}
+		end := page.EndCursor
+		cursor = &end
+	}
+	return out, nil
+}
+
+// ResolveReviewThread marks a review thread resolved via GraphQL (no REST
+// equivalent). GraphQL reports authorization/argument failures in the response
+// body with a 200 status, so c.do would treat them as success — parse the
+// errors field so a permission denial surfaces to the caller as an error (the
+// reporter treats it as a best-effort skip, never a failed check run).
+func (c *GitHubClient) ResolveReviewThread(ctx context.Context, threadID string) error {
+	const m = `mutation($threadId:ID!){ resolveReviewThread(input:{threadId:$threadId}){ thread{ id } } }`
+	body := map[string]any{"query": m, "variables": map[string]any{"threadId": threadID}}
+	var res struct {
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/graphql", body, &res); err != nil {
+		return err
+	}
+	if len(res.Errors) > 0 {
+		return fmt.Errorf("resolveReviewThread %s: %s", threadID, res.Errors[0].Message)
+	}
+	return nil
+}
+
 // --- merged-PR enumeration (the scheduled learn batch) ---
 
 // MergedPR is the slice of a closed pull request the batch learn flow needs:
