@@ -47,6 +47,16 @@ func RunReview(ctx context.Context, opt RunOptions) (Result, *Packet, error) {
 		return Result{}, nil, fmt.Errorf("build packet: %w", err)
 	}
 
+	// Auto effort: size the review level from the diff now that the packet is
+	// built, before the pipeline (and its EffortProfile) reads Config.Effort. An
+	// explicit SWATTER_EFFORT is any other value and passes through untouched.
+	if opt.Config.Effort == EffortAuto {
+		lvl := resolveEffort(len(packet.ChangedFiles), packet.ChangedLines)
+		opt.Config.Effort = lvl
+		opt.Progress(fmt.Sprintf("effort auto → %s (%d file(s), %d changed line(s))",
+			lvl, len(packet.ChangedFiles), packet.ChangedLines))
+	}
+
 	budget := NewBudget(opt.Config)
 	pipeline, err := NewPipeline(opt.Config, packet, budget, opt.Progress)
 	if err != nil {
