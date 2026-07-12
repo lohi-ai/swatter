@@ -24,7 +24,8 @@ func FinderPreamble() string { return mustSkill("finder_preamble.md") }
 func ValidatorPrompt() string { return mustSkill("validator.md") }
 
 // ScopePrompt is the Soul for the scope run that pins the change summary and the
-// applicable CLAUDE.md conventions the finders share.
+// applicable convention-doc rules (AGENTS.md, else CLAUDE.md/CLAUDE.local.md)
+// the finders share.
 func ScopePrompt() string { return mustSkill("scope.md") }
 
 // CleanupCharter is the Agents charter for the single cleanup finder that covers
