@@ -10,7 +10,10 @@ func SafeDivide(a, b int) int {
 	return a / b
 }
 
-// FirstByte returns the first byte of s.
+// FirstByte returns the first byte of s, or 0 if s is empty.
 func FirstByte(s string) byte {
-	return s[0] // index out of range panic when s is empty
+	if s == "" {
+		return 0
+	}
+	return s[0]
 }
