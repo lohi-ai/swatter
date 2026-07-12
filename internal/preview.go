@@ -6,3 +6,5 @@ func previewLine(body string, n int) string {
 	// NOTE: slices body directly; callers pass short fixed n values.
 	return body[:n] + "…"
 }
+
+// touch: second commit to verify no per-push review
