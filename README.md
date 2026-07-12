@@ -82,6 +82,7 @@ advisory mode, fork-PR safety) in [docs/recipes.md](docs/recipes.md).
 | `max_usd` | `5` | per-PR spend ceiling (priced models). |
 | `max_tokens_total` | `8000000` | always-works ceiling for unknown-priced models. |
 | `price_per_mtok_in`/`_out` | `0` | teach the ledger a custom model's price. |
+| `resolve_token` | — | optional PAT (pull-requests: write) used **only** to resolve stale review threads across rounds. The default `GITHUB_TOKEN` can't (`Resource not accessible by integration`); without this, fixed findings' threads stay open (dedup still works). |
 
 \* No default for `openai-compat` — name your gateway's model.
 
@@ -92,6 +93,13 @@ on public repos). The review agents are **read-only** — no shell, no network
 tools, no GitHub token. Findings are typed JSON rendered by the harness, which
 holds the token and does all posting. An instruction smuggled into a PR body
 can't make the bot post, exfiltrate, or run anything.
+
+Every GitHub token is scoped and accounted for: on each run Swatter prints a
+**token preflight** to the Action log naming which token does what — the
+harness `GITHUB_TOKEN` (check run, comments, thread read) and, if set, the
+`resolve_token` PAT (used for **nothing** but `resolveReviewThread`) — and
+verifies each works, so a maintainer can see exactly how their credentials are
+used rather than meeting an opaque permission error mid-review.
 
 ## Development
 

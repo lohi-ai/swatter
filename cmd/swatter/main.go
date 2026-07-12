@@ -353,6 +353,14 @@ func setupReporter(ctx context.Context, cfg internal.Config, event *internal.Git
 		return nil, stderrProgress
 	}
 
+	// Token transparency: before any GitHub write, state which token does what
+	// and verify each works, so a maintainer sees exactly how Swatter uses their
+	// credentials (and a bad/missing PAT is a clear warning, not an opaque
+	// mid-run permission error). Log-only, best-effort.
+	for _, line := range gh.PreflightTokens(ctx).Render() {
+		stderrProgress(line)
+	}
+
 	headSHA := event.PullRequest.Head.SHA
 	if headSHA == "" {
 		headSHA = internal.HeadSHA(ctx, repoRoot)

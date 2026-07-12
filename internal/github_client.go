@@ -63,6 +63,99 @@ func NewGitHubClientFromEnv() (*GitHubClient, error) {
 // firing calls the default GITHUB_TOKEN is known to reject.
 func (c *GitHubClient) CanResolveThreads() bool { return c.resolveToken != "" }
 
+// TokenPreflight is the result of checking the GitHub tokens Swatter will use,
+// for a transparency notice printed to the Action log before any token
+// operation runs. It never carries a token value — only whether each works and
+// the login it acts as — so a maintainer can see exactly what each credential
+// is used for and isn't left guessing when a permission error appears mid-run.
+type TokenPreflight struct {
+	PrimaryOK    bool   // primary token can read the repo
+	PrimaryActor string // login the primary token acts as, "" if not a user token
+	PrimaryErr   string // repo-access error, if PrimaryOK is false
+	ResolveSet   bool   // a resolve token is configured
+	ResolveOK    bool   // resolve token authenticates
+	ResolveActor string // login the resolve token acts as
+	ResolveErr   string // auth error, if the resolve token is set but invalid
+}
+
+// PreflightTokens verifies each configured token with a cheap read so a bad or
+// missing credential surfaces as a clear up-front warning instead of GitHub's
+// opaque "Resource not accessible by integration" partway through a review. The
+// primary (Actions) token is a server-to-server installation token that can't
+// GET /user, so its liveness is probed with a repo read; a resolve PAT is a
+// user token, so GET /user both validates it and names whose PAT it is.
+func (c *GitHubClient) PreflightTokens(ctx context.Context) TokenPreflight {
+	var p TokenPreflight
+	if _, err := c.doStatusAs(ctx, c.token, http.MethodGet,
+		fmt.Sprintf("/repos/%s/%s", c.owner, c.repo), nil, nil); err != nil {
+		p.PrimaryErr = err.Error()
+	} else {
+		p.PrimaryOK = true
+		if login, e := c.viewerLogin(ctx, c.token); e == nil {
+			p.PrimaryActor = login // usually empty for the installation token
+		}
+	}
+	p.ResolveSet = c.resolveToken != ""
+	if p.ResolveSet {
+		if login, err := c.viewerLogin(ctx, c.resolveToken); err != nil {
+			p.ResolveErr = err.Error()
+		} else {
+			p.ResolveOK = true
+			p.ResolveActor = login
+		}
+	}
+	return p
+}
+
+// viewerLogin returns the login a token authenticates as via GET /user. An
+// installation token (the Actions GITHUB_TOKEN) is rejected here — that is
+// expected and handled by the caller, not treated as a failure of the token.
+func (c *GitHubClient) viewerLogin(ctx context.Context, token string) (string, error) {
+	var u struct {
+		Login string `json:"login"`
+	}
+	if _, err := c.doStatusAs(ctx, token, http.MethodGet, "/user", nil, &u); err != nil {
+		return "", err
+	}
+	return u.Login, nil
+}
+
+// Render formats the preflight as the multi-line stderr notice. Every line is
+// prefixed by the caller with "swatter: "; this returns the body lines.
+func (p TokenPreflight) Render() []string {
+	resolvePurpose := "resolve stale threads ONLY"
+	if !p.ResolveSet {
+		resolvePurpose += " [not set]"
+	}
+	lines := []string{
+		"github access (review agents never receive these tokens):",
+		"  · primary GITHUB_TOKEN          -> check run, PR comments, thread read",
+		"  · resolve SWATTER_RESOLVE_TOKEN -> " + resolvePurpose,
+	}
+
+	switch {
+	case !p.PrimaryOK:
+		lines = append(lines, fmt.Sprintf("preflight: primary token FAILED repo access (%s) — check run/comments may not post", p.PrimaryErr))
+	case p.PrimaryActor != "":
+		lines = append(lines, fmt.Sprintf("preflight: primary token ok (acting as %s)", p.PrimaryActor))
+	default:
+		lines = append(lines, "preflight: primary token ok (Actions/App installation token)")
+	}
+
+	switch {
+	case !p.ResolveSet:
+		lines = append(lines,
+			"preflight: resolve token MISSING -> stale threads will be left open, not resolved.",
+			"           Set a PAT (pull-requests: write) as SWATTER_RESOLVE_TOKEN to enable.",
+			"           Swatter uses it for nothing but resolveReviewThread.")
+	case !p.ResolveOK:
+		lines = append(lines, fmt.Sprintf("preflight: resolve token INVALID (%s) — stale threads will be left open; check the PAT", p.ResolveErr))
+	default:
+		lines = append(lines, fmt.Sprintf("preflight: resolve token ok (acting as %s) — used only for resolveReviewThread", p.ResolveActor))
+	}
+	return lines
+}
+
 // Permalink returns a browser URL to a file line at a commit sha.
 func (c *GitHubClient) Permalink(sha, path string, line int) string {
 	u := fmt.Sprintf("%s/%s/%s/blob/%s/%s", c.srvURL, c.owner, c.repo, sha, path)
