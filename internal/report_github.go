@@ -72,15 +72,30 @@ func (r *Reporter) Finish(ctx context.Context, res Result, packet *Packet) error
 		return nil
 	}
 
-	// Split findings into in-diff (inline comments) and out-of-diff (summary).
-	// Findings are severity-sorted, so the first one to claim a (path, line)
-	// is the most severe — a guard against a later sweep re-commenting a line.
+	// Reconcile against Swatter's existing threads on this PR (multi-round
+	// re-review): drop findings that already have an open comment thread so they
+	// aren't duplicated, and collect stale threads (finding gone) to resolve.
+	// The check-run summary and sticky comment still reflect the full review —
+	// only inline comment posting is deduped. Best-effort: a fetch failure falls
+	// back to the pre-reconcile behavior (post everything, resolve nothing).
+	postSet := res.Findings
+	var toResolve []string
+	if threads, err := r.gh.ReviewThreads(ctx, r.pr); err != nil {
+		r.Progress(fmt.Sprintf("thread reconcile skipped (%v) — posting all findings", err))
+	} else {
+		postSet, toResolve = reconcile(res.Findings, threads, r.cfg.BotLogin)
+	}
+
+	// Split the post-set into in-diff (inline comments) and out-of-diff
+	// (summary). Findings are severity-sorted, so the first one to claim a
+	// (path, line) is the most severe — a guard against a later sweep
+	// re-commenting a line.
 	dm := BuildDiffMap(packet.Diff)
 	seen := map[string]bool{}
 	var inline []reviewComment
 	var inlineFindings []Finding // parallel to inline: the findings posted inline
 	var outOfDiff []Finding
-	for _, f := range res.Findings {
+	for _, f := range postSet {
 		if f.Line > 0 && dm.Commentable(f.File, f.Line) {
 			key := fmt.Sprintf("%s:%d", f.File, f.Line)
 			if seen[key] {
@@ -106,6 +121,21 @@ func (r *Reporter) Finish(ctx context.Context, res Result, packet *Packet) error
 			r.Progress(fmt.Sprintf("inline review failed (%v) — findings moved to the summary comment", err))
 			inlineFailed = true
 		}
+	}
+
+	// Resolve stale threads (finding gone this round). Best-effort, per the same
+	// contract as the inline post: a failure — e.g. the token can't resolve a
+	// thread it authored — is a progress note, never a failed check run.
+	resolved := 0
+	for _, id := range toResolve {
+		if err := r.gh.ResolveReviewThread(ctx, id); err != nil {
+			r.Progress(fmt.Sprintf("resolve stale thread failed (%v)", err))
+			continue
+		}
+		resolved++
+	}
+	if resolved > 0 {
+		r.Progress(fmt.Sprintf("resolved %d stale comment thread(s)", resolved))
 	}
 
 	// When the inline review didn't post, the in-diff findings have nowhere else
