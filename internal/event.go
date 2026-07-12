@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 )
 
 // GitHubEvent is the subset of a pull_request / issue_comment webhook payload
@@ -42,6 +43,9 @@ type GitHubEvent struct {
 	} `json:"issue"`
 	Comment struct {
 		Body string `json:"body"`
+		// AuthorAssociation gates who may re-trigger a review by mention. The
+		// workflow `if:` is the primary guard; this is the runtime backstop.
+		AuthorAssociation string `json:"author_association"`
 	} `json:"comment"`
 	Repository struct {
 		FullName string `json:"full_name"`
@@ -72,6 +76,20 @@ func (e *GitHubEvent) IsFork() bool {
 // for a PR that actually merged — the trigger for the feedback/learn flow.
 func (e *GitHubEvent) IsMergedClose() bool {
 	return e.Action == "closed" && e.PullRequest.Merged
+}
+
+// IsIssueComment reports whether this payload is a comment on a pull request
+// (the on-demand `@swatter review` re-trigger path). Issue comments on plain
+// issues carry no PullRequest link and are ignored.
+func (e *GitHubEvent) IsIssueComment() bool {
+	return e.Issue.PullRequest != nil
+}
+
+// ReviewMentioned reports whether a comment body asks swatter to review, i.e.
+// contains "@swatter review" (case-insensitive). The workflow already filters
+// on this; the runtime re-checks so a mis-wired trigger can't burn a review.
+func (e *GitHubEvent) ReviewMentioned() bool {
+	return strings.Contains(strings.ToLower(e.Comment.Body), "@swatter review")
 }
 
 // PRNumber returns the pull-request number from either a pull_request or an

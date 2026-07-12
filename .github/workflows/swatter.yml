@@ -1,10 +1,12 @@
 name: swatter
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, reopened]
+  issue_comment:
+    types: [created]
 
 concurrency:
-  group: swatter-${{ github.event.pull_request.number }}
+  group: swatter-${{ github.event.issue.number || github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:
@@ -14,11 +16,17 @@ permissions:
 
 jobs:
   review:
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event.issue.pull_request &&
+       contains(github.event.comment.body, '@swatter review') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || '' }}
       - id: swatter
         uses: lohi-ai/swatter@v0
         with:

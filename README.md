@@ -27,8 +27,16 @@ is the #1 complaint. Swatter runs a find-then-verify pipeline instead:
 
 ```bash
 # in your repo, with the GitHub CLI authenticated:
-swatter init          # asks provider/model, writes the workflow, sets the secret
+swatter init          # asks provider/model + review trigger, writes the workflow, sets the secret
 ```
+
+`init` asks how you want reviews triggered:
+
+- **per-commit** (default) — reviews on every push. Continuous, but pays for a
+  full review per commit. (`swatter init --mode per-commit`)
+- **on-demand** — reviews on PR open, then only when a maintainer comments
+  `@swatter review`. No per-commit runs, so it spends far fewer tokens on churny
+  PRs. (`swatter init --mode on-demand`)
 
 …or add `.github/workflows/swatter.yml` by hand:
 

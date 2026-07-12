@@ -91,3 +91,33 @@ func TestListMergedPRsEmpty(t *testing.T) {
 		t.Fatalf("want no PRs, got %+v", got)
 	}
 }
+
+// GetPR must hit /pulls/{n} and return the base ref, head sha, and title/body —
+// the fields an issue_comment payload omits, which the on-demand @swatter review
+// path fetches to build the packet and anchor the report.
+func TestGetPR(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/repos/o/r/pulls/42" {
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+		w.Write([]byte(`{
+			"title": "Fix the widget",
+			"body": "closes #7",
+			"head": { "sha": "deadbeefcafe" },
+			"base": { "ref": "main" }
+		}`))
+	}))
+	defer srv.Close()
+
+	c := &GitHubClient{apiURL: srv.URL, owner: "o", repo: "r", token: "t", http: srv.Client()}
+	pr, err := c.GetPR(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("GetPR: %v", err)
+	}
+	if pr.BaseRef != "main" || pr.HeadSHA != "deadbeefcafe" {
+		t.Errorf("refs = %q/%q, want main/deadbeefcafe", pr.BaseRef, pr.HeadSHA)
+	}
+	if pr.Title != "Fix the widget" || pr.Body != "closes #7" {
+		t.Errorf("title/body = %q/%q", pr.Title, pr.Body)
+	}
+}

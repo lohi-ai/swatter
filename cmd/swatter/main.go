@@ -103,6 +103,22 @@ func cmdRun(args []string) int {
 
 	ctx := context.Background()
 
+	// On-demand mode: an issue_comment only triggers a review when it asks for
+	// one ("@swatter review"). The workflow `if:` already filters on this and on
+	// commenter permission, so reaching here without the mention means a
+	// mis-wired trigger — exit neutral rather than burn a review. The comment
+	// payload omits the PR's base/head refs and title/body, so fetch them.
+	if event != nil && event.IsIssueComment() {
+		if !event.ReviewMentioned() {
+			fmt.Fprintln(os.Stderr, "swatter: comment does not mention @swatter review — nothing to do.")
+			return 0
+		}
+		if err := enrichFromPR(ctx, event); err != nil {
+			fmt.Fprintf(os.Stderr, "swatter: resolve PR for comment: %v\n", err)
+			return 2
+		}
+	}
+
 	// A pull_request `closed` event is not a review trigger: when the PR merged
 	// it computes the would-be rule-book update (compute-only — never commits)
 	// so the CI log carries a preview; a close-without-merge is a no-op. The
@@ -301,6 +317,30 @@ func runLearnFlow(ctx context.Context, cfg internal.Config, pr int, branch strin
 // setupReporter builds a GitHub reporter when a token + PR number are present.
 // Returns the reporter (nil if unavailable) and the ProgressFn to hand the
 // pipeline (sticky-comment updater, or a stderr logger otherwise).
+// enrichFromPR fills the base/head refs and title/body on an issue_comment
+// event by fetching the pull request — the comment payload carries only the PR
+// number. Downstream (RunReview base derivation, reporter head anchor) then
+// works exactly as it does for a pull_request event.
+func enrichFromPR(ctx context.Context, event *internal.GitHubEvent) error {
+	gh, err := internal.NewGitHubClientFromEnv()
+	if err != nil {
+		return err
+	}
+	if gh == nil {
+		return fmt.Errorf("no GITHUB_TOKEN available")
+	}
+	pr, err := gh.GetPR(ctx, event.PRNumber())
+	if err != nil {
+		return err
+	}
+	event.PullRequest.Number = event.PRNumber()
+	event.PullRequest.Base.Ref = pr.BaseRef
+	event.PullRequest.Head.SHA = pr.HeadSHA
+	event.PullRequest.Title = pr.Title
+	event.PullRequest.Body = pr.Body
+	return nil
+}
+
 func setupReporter(ctx context.Context, cfg internal.Config, event *internal.GitHubEvent, repoRoot string) (*internal.Reporter, internal.ProgressFn) {
 	stderrProgress := func(note string) { fmt.Fprintf(os.Stderr, "swatter: %s\n", note) }
 

@@ -18,6 +18,7 @@ func CmdInit(args []string) int {
 	provider := fs.String("provider", "", "anthropic | openai-compat (prompted if empty)")
 	model := fs.String("model", "", "strong model id (prompted if empty)")
 	baseURL := fs.String("base-url", "", "gateway base URL (openai-compat)")
+	mode := fs.String("mode", "", "per-commit | on-demand (prompted if empty)")
 	noSecret := fs.Bool("no-secret", false, "skip `gh secret set` (write the workflow only)")
 	yes := fs.Bool("yes", false, "accept defaults, no prompts")
 	if err := fs.Parse(args); err != nil {
@@ -55,8 +56,18 @@ func CmdInit(args []string) int {
 	if Provider(*provider) == ProviderOpenAICompat && *baseURL == "" {
 		*baseURL = ask("Gateway base URL (e.g. https://9router.example/v1)", "")
 	}
+	if *mode == "" {
+		fmt.Println("When should Swatter review?")
+		fmt.Println("  per-commit — on every push to the PR (reviews continuously)")
+		fmt.Println("  on-demand  — on PR open, then only when a maintainer comments \"@swatter review\" (saves tokens)")
+		*mode = ask("Review trigger (per-commit | on-demand)", "per-commit")
+	}
+	if *mode != string(modePerCommit) && *mode != string(modeOnDemand) {
+		fmt.Fprintf(os.Stderr, "swatter init: unknown mode %q (want on-demand | per-commit)\n", *mode)
+		return 2
+	}
 
-	wf := renderWorkflow(*provider, *model, *baseURL)
+	wf := renderWorkflow(*provider, *model, *baseURL, ReviewMode(*mode))
 	dst := filepath.Join(".github", "workflows", "swatter.yml")
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "swatter init: %v\n", err)
@@ -78,8 +89,15 @@ func CmdInit(args []string) int {
 	fmt.Println()
 	fmt.Println("Next steps:")
 	fmt.Println("  1. Commit .github/workflows/swatter.yml and open a PR — Swatter reviews it.")
-	fmt.Println("  2. (optional) Require the \"Swatter\" check under Settings → Branches →")
-	fmt.Println("     Branch protection to block merges on confirmed findings.")
+	if ReviewMode(*mode) == modeOnDemand {
+		fmt.Println("  2. Push more commits freely — Swatter stays quiet. Comment \"@swatter review\"")
+		fmt.Println("     (as a repo owner/member/collaborator) to re-review the latest head.")
+		fmt.Println("  3. (optional) Require the \"Swatter\" check under Settings → Branches →")
+		fmt.Println("     Branch protection to block merges on confirmed findings.")
+	} else {
+		fmt.Println("  2. (optional) Require the \"Swatter\" check under Settings → Branches →")
+		fmt.Println("     Branch protection to block merges on confirmed findings.")
+	}
 	return 0
 }
 
@@ -109,7 +127,20 @@ func setSecret(in *bufio.Reader, yes bool) error {
 	return nil
 }
 
-func renderWorkflow(provider, model, baseURL string) string {
+// ReviewMode selects when the generated workflow triggers a review.
+type ReviewMode string
+
+const (
+	// modeOnDemand reviews on PR open/reopen, then only when a maintainer
+	// comments "@swatter review" — no per-commit runs, so it spends far fewer
+	// tokens on churny PRs.
+	modeOnDemand ReviewMode = "on-demand"
+	// modePerCommit reviews on every push (opened + synchronize) — continuous
+	// but pays for a full review per commit.
+	modePerCommit ReviewMode = "per-commit"
+)
+
+func renderWorkflow(provider, model, baseURL string, mode ReviewMode) string {
 	with := "          api_key: ${{ secrets.SWATTER_API_KEY }}\n"
 	if provider != "" && provider != string(ProviderAnthropic) {
 		with += fmt.Sprintf("          provider: %s\n", provider)
@@ -120,9 +151,16 @@ func renderWorkflow(provider, model, baseURL string) string {
 	if model != "" {
 		with += fmt.Sprintf("          model: %s\n", model)
 	}
-	// `closed` runs the post-merge feedback/learn flow (merged PRs only) and
-	// needs contents:write so the rule book can be committed to the base branch.
-	return `name: swatter
+	if mode == modeOnDemand {
+		return onDemandWorkflow + with
+	}
+	return perCommitWorkflow + with
+}
+
+// perCommitWorkflow reviews on every push. `closed` runs the post-merge
+// feedback/learn flow (merged PRs only) and needs contents:write so the rule
+// book can be committed to the base branch.
+const perCommitWorkflow = `name: swatter
 on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
@@ -146,5 +184,43 @@ jobs:
       - id: swatter
         uses: lohi-ai/swatter@v0
         with:
-` + with
-}
+`
+
+// onDemandWorkflow reviews on PR open/reopen and on a "@swatter review" comment
+// from a trusted commenter (OWNER/MEMBER/COLLABORATOR) — not on every push. The
+// comment payload has no PR head, so it checks out refs/pull/N/head. `closed`
+// still runs the post-merge learn flow. The concurrency group falls back to the
+// issue number on comment events (both resolve to the PR number).
+const onDemandWorkflow = `name: swatter
+on:
+  pull_request:
+    types: [opened, reopened, closed]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: swatter-${{ github.event.issue.number || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: write
+
+jobs:
+  review:
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event.issue.pull_request &&
+       contains(github.event.comment.body, '@swatter review') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || '' }}
+      - id: swatter
+        uses: lohi-ai/swatter@v0
+        with:
+`

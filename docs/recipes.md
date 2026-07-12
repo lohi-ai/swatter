@@ -149,33 +149,38 @@ lower levels under that:
           max_usd: '1'       # the review-wide ledger still backstops everything
 ```
 
-## `@swatter review` re-trigger
+## `@swatter review` re-trigger (on-demand mode)
 
-Re-run the review on demand by commenting `@swatter review` on the PR:
+`swatter init --mode on-demand` generates a single workflow that reviews on PR
+open, then only when a maintainer comments `@swatter review` — no per-commit
+runs. Push commits freely; the review refreshes only when asked. To add the
+comment trigger to an existing per-commit workflow by hand, extend it with:
 
 ```yaml
-name: swatter-mention
 on:
+  pull_request:
+    types: [opened, reopened, closed]
   issue_comment:
     types: [created]
 
-permissions:
-  contents: read
-  pull-requests: write
-  checks: write
-
 jobs:
   review:
-    # only PR comments that start with the mention
+    # PR events, or a "@swatter review" comment from a trusted commenter.
+    # The author_association gate matters: issue_comment runs with a *write*
+    # token even on fork PRs, so without it any drive-by commenter could spend
+    # your tokens (and trigger a checkout of untrusted head).
     if: >-
-      github.event.issue.pull_request != null &&
-      startsWith(github.event.comment.body, '@swatter review')
+      github.event_name == 'pull_request' ||
+      (github.event.issue.pull_request &&
+       contains(github.event.comment.body, '@swatter review') &&
+       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: refs/pull/${{ github.event.issue.number }}/head
+          # the comment payload has no PR head — check out refs/pull/N/head
+          ref: ${{ github.event_name == 'issue_comment' && format('refs/pull/{0}/head', github.event.issue.number) || '' }}
       - uses: lohi-ai/swatter@v1
         with:
           api_key: ${{ secrets.SWATTER_API_KEY }}
@@ -183,7 +188,10 @@ jobs:
 ```
 
 The reporter reuses the same sticky comment, so a re-trigger updates the
-existing review in place instead of stacking comments.
+existing review in place instead of stacking comments. Because `issue_comment`
+runs in the base-repo context with a write token, this is also the way to review
+a **fork** PR on demand — the auto-run on `opened` skips forks (their token is
+read-only), but a maintainer's `@swatter review` reviews it.
 
 ## Path-filtered review
 
