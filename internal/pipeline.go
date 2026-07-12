@@ -87,8 +87,8 @@ func (p *Pipeline) Run(ctx context.Context) (Result, error) {
 	}
 
 	// Phase 0 — Scope: a shared summary + the applicable convention-doc rules
-	// (AGENTS.md, else CLAUDE.md), pinned once so every finder does not re-derive
-	// them. Best-effort; low
+	// (AGENTS.md, else CLAUDE.md/CLAUDE.local.md), pinned once so every finder
+	// does not re-derive them. Best-effort; low
 	// effort skips the extra call and reviews from the deterministic brief.
 	brief := p.packet.Brief
 	if prof.Scope {
@@ -172,8 +172,8 @@ func (p *Pipeline) Run(ctx context.Context) (Result, error) {
 // --- Phase 0: scope ---
 
 // scopeNote is what the scope agent pins: a one-paragraph change summary and the
-// applicable convention-doc rules (AGENTS.md, else CLAUDE.md), shared by every
-// finder.
+// applicable convention-doc rules (AGENTS.md, else CLAUDE.md/CLAUDE.local.md),
+// shared by every finder.
 type scopeNote struct {
 	Summary     string   `json:"summary"`
 	Conventions []string `json:"conventions"`
