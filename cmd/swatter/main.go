@@ -234,10 +234,11 @@ func cmdLearn(args []string) int {
 }
 
 // runLearnBatch is the scheduled sole-writer flow: enumerate every PR merged in
-// the lookback window and fold each one's feedback into the rule book. Base
-// branch comes per-PR from the merge, so a repo with several release branches
-// commits each PR's update to the branch it merged into. A single PR's failure
-// is logged and skipped — one unreadable PR must not sink the whole nightly run.
+// the lookback window and fold their feedback into the rule book, batched per
+// base branch — deterministic scoring per PR, one promotion pass and one commit
+// per file per branch, so the LLM cost stays flat as PR volume grows. A single
+// PR's failure is logged and skipped inside the batch — one unreadable PR must
+// not sink the whole nightly run.
 func runLearnBatch(ctx context.Context, cfg internal.Config, window time.Duration) int {
 	gh, err := internal.NewGitHubClientFromEnv()
 	if err != nil {
@@ -256,35 +257,15 @@ func runLearnBatch(ctx context.Context, cfg internal.Config, window time.Duratio
 	}
 	fmt.Printf("swatter learn: %d PR(s) merged since %s\n", len(prs), since.Format("2006-01-02 15:04Z"))
 	progress := func(note string) { fmt.Fprintf(os.Stderr, "swatter learn: %s\n", note) }
-	return learnBatch(prs, func(pr int, branch string) error {
-		sum, err := internal.RunFeedback(ctx, cfg, gh, pr, branch, progress)
-		if err != nil {
-			return err
-		}
-		fmt.Printf("swatter learn: PR #%d — %d signal(s): %d hit / %d miss, +%d obs, %d promoted, committed %v\n",
-			pr, sum.Signals, sum.Hits, sum.Misses, sum.ObsAdded, sum.RulesPromoted, sum.Committed)
-		return nil
-	})
-}
-
-// learnBatch applies process to every merged PR — defaulting a missing base ref
-// to main — and skips-and-counts per-PR failures so one unreadable PR can't sink
-// the nightly run. Returns 1 if any PR failed, 0 otherwise. Split out from
-// runLearnBatch so the orchestration is testable without the GitHub API.
-func learnBatch(prs []internal.MergedPR, process func(pr int, branch string) error) int {
-	failed := 0
-	for _, pr := range prs {
-		branch := pr.BaseRef
-		if branch == "" {
-			branch = "main"
-		}
-		if err := process(pr.Number, branch); err != nil {
-			fmt.Fprintf(os.Stderr, "swatter learn: PR #%d: %v\n", pr.Number, err)
-			failed++
-		}
+	sum, err := internal.RunFeedbackBatch(ctx, cfg, gh, prs, progress)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "swatter learn: %v\n", err)
+		return 1
 	}
-	if failed > 0 {
-		fmt.Fprintf(os.Stderr, "swatter learn: %d of %d PR(s) failed\n", failed, len(prs))
+	fmt.Printf("swatter learn: %d scanned, %d already scored, %d failed — %d signal(s): %d hit / %d miss, +%d obs, %d promoted, committed %v\n",
+		sum.Scanned, sum.SkippedScored, sum.Failed, sum.Signals, sum.Hits, sum.Misses, sum.ObsAdded, sum.RulesPromoted, sum.Committed)
+	if sum.Failed > 0 {
+		fmt.Fprintf(os.Stderr, "swatter learn: %d PR(s) failed\n", sum.Failed)
 		return 1
 	}
 	return 0
