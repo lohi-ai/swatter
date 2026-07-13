@@ -17,7 +17,9 @@ permissions:
 jobs:
   review:
     if: >-
-      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request' &&
+       (github.event.action == 'closed' ||
+        github.event.pull_request.head.repo.full_name == github.repository)) ||
       (github.event.issue.pull_request &&
        contains(github.event.comment.body, '@swatter review') &&
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))

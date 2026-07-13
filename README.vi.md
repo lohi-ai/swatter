@@ -55,6 +55,10 @@ permissions:
   checks: write
 jobs:
   review:
+    # Chỉ PR cùng repo. Trên public repo, PR từ fork chỉ có token read-only và
+    # không có secrets nên auto-review không post được — xem docs/recipes.md để
+    # review PR fork theo yêu cầu.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
