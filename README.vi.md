@@ -74,6 +74,41 @@ Mở một PR — Swatter post comment inline, một comment tổng kết, và m
 theo path, chế độ advisory, an toàn với fork-PR) trong
 [docs/recipes.vi.md](docs/recipes.vi.md).
 
+## CLI standalone (thử trước khi gắn vào CI)
+
+Muốn xem Swatter chạy trên code của bạn trước khi dựng workflow? Chạy review
+ngay tại máy. Lưu key một lần, kiểm tra provider có trả lời không, rồi review
+nhánh hiện tại:
+
+```bash
+swatter config set api-key sk-…       # lưu 0600 vào ~/.config/swatter/config.json
+swatter doctor                        # kiểm tra config, git, GitHub token + một lần gọi model rẻ
+swatter review                        # review nhánh hiện tại so với nhánh mặc định → stdout
+swatter review high                   # ép mức effort (auto|low|medium|high|xhigh|max)
+swatter review main..HEAD             # review một range git cụ thể (three-dot / merge-base)
+swatter review low --comment 42       # review và post finding lên PR #42 (cần GitHub token)
+```
+
+- **`swatter config set|get|list|path`** quản lý `~/.config/swatter/config.json`
+  (tôn trọng `$XDG_CONFIG_HOME`) để bạn khỏi export `SWATTER_*` bằng tay. Các
+  key: `api-key`, `provider`, `base-url`, `model`, `model-cheap`, `effort`,
+  `fail-on`, `github-token`, `resolve-token`. File được xếp **dưới** environment
+  — biến `SWATTER_*` đã set luôn thắng — nên CI (vốn set env và không có file)
+  không bị ảnh hưởng. `config list` che các giá trị bí mật.
+- **`swatter doctor`** validate config, kiểm tra ngữ cảnh git và (nếu có token)
+  quyền GitHub, rồi gọi model một lần thật nhỏ để một key/gateway sai sẽ báo lỗi
+  sớm thay vì giữa chừng. `--no-llm` để bỏ qua lần gọi đó.
+- **`swatter review [effort] [--comment] [<target>]`** chạy đúng pipeline
+  find-then-verify như CI. `<target>` để trống (nhánh hiện tại so với merge-base
+  với nhánh mặc định), một ref/range git, hoặc số/URL của PR. Không có
+  `--comment` thì finding in ra stdout (`--format json` cho output máy đọc).
+  `--comment` post lên PR y như CI — hãy checkout nhánh của PR trước để comment
+  inline neo đúng commit, và set GitHub token (`swatter config set github-token …`
+  hoặc `GITHUB_TOKEN`).
+
+`run`/`learn`/`init` và GitHub Action giữ nguyên — CLI chỉ là một cửa vào mới
+trên cùng một engine, không phải bản thay thế.
+
 ## Configuration
 
 | Input | Mặc định | Ghi chú |

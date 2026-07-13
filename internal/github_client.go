@@ -34,12 +34,26 @@ type GitHubClient struct {
 	resolveToken string
 }
 
+// newGitHubClient assembles a client for an explicit owner/repo, reading the
+// token and URLs from the environment exactly as the Action provides them. The
+// two public constructors below differ only in how owner/repo is resolved.
+func newGitHubClient(owner, repo string) *GitHubClient {
+	return &GitHubClient{
+		token:        firstEnv("SWATTER_GITHUB_TOKEN", "GITHUB_TOKEN"),
+		apiURL:       envDefault("GITHUB_API_URL", "https://api.github.com"),
+		srvURL:       envDefault("GITHUB_SERVER_URL", "https://github.com"),
+		owner:        owner,
+		repo:         repo,
+		http:         &http.Client{Timeout: 30 * time.Second},
+		resolveToken: strings.TrimSpace(os.Getenv("SWATTER_RESOLVE_TOKEN")),
+	}
+}
+
 // NewGitHubClientFromEnv builds a client from the Actions environment
 // (GITHUB_TOKEN, GITHUB_API_URL, GITHUB_SERVER_URL, GITHUB_REPOSITORY). Returns
 // (nil, nil) when no token is present — the caller then reports to stdout only.
 func NewGitHubClientFromEnv() (*GitHubClient, error) {
-	token := firstEnv("SWATTER_GITHUB_TOKEN", "GITHUB_TOKEN")
-	if token == "" {
+	if firstEnv("SWATTER_GITHUB_TOKEN", "GITHUB_TOKEN") == "" {
 		return nil, nil
 	}
 	full := os.Getenv("GITHUB_REPOSITORY") // owner/repo
@@ -47,15 +61,21 @@ func NewGitHubClientFromEnv() (*GitHubClient, error) {
 	if !ok {
 		return nil, fmt.Errorf("GITHUB_REPOSITORY %q is not owner/repo", full)
 	}
-	return &GitHubClient{
-		token:        token,
-		apiURL:       envDefault("GITHUB_API_URL", "https://api.github.com"),
-		srvURL:       envDefault("GITHUB_SERVER_URL", "https://github.com"),
-		owner:        owner,
-		repo:         repo,
-		http:         &http.Client{Timeout: 30 * time.Second},
-		resolveToken: strings.TrimSpace(os.Getenv("SWATTER_RESOLVE_TOKEN")),
-	}, nil
+	return newGitHubClient(owner, repo), nil
+}
+
+// NewGitHubClientForRepo builds a client for an explicit owner/repo — the
+// standalone CLI path, where GITHUB_REPOSITORY is not set and owner/repo is
+// derived from the git remote instead. Returns (nil, nil) when no token is
+// present so callers can degrade to stdout, matching NewGitHubClientFromEnv.
+func NewGitHubClientForRepo(owner, repo string) (*GitHubClient, error) {
+	if firstEnv("SWATTER_GITHUB_TOKEN", "GITHUB_TOKEN") == "" {
+		return nil, nil
+	}
+	if owner == "" || repo == "" {
+		return nil, fmt.Errorf("owner/repo required for a standalone GitHub client")
+	}
+	return newGitHubClient(owner, repo), nil
 }
 
 // CanResolveThreads reports whether a resolve-capable token is configured. When

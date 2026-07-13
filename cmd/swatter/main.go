@@ -26,6 +26,12 @@ func main() {
 		os.Exit(cmdLearn(os.Args[2:]))
 	case "init":
 		os.Exit(internal.CmdInit(os.Args[2:]))
+	case "review":
+		os.Exit(internal.CmdReview(os.Args[2:]))
+	case "config":
+		os.Exit(internal.CmdConfig(os.Args[2:]))
+	case "doctor":
+		os.Exit(internal.CmdDoctor(os.Args[2:]))
 	case "-h", "--help", "help":
 		usage()
 		os.Exit(0)
@@ -40,15 +46,28 @@ func usage() {
 	fmt.Fprint(os.Stderr, `swatter — PR-review bugbot on agentcore
 
 Usage:
-  swatter run   [flags]  Review a PR / branch and report findings
-                         (on a merged pull_request "closed" event this computes
-                         the feedback/learn preview without committing)
-  swatter learn [flags]  Learn from merged-PR feedback: score rules from
-                         reactions/replies/resolutions, record gap evidence,
-                         promote repeated patterns, commit the rule book.
-                         --since 72h scans a window (the scheduled sole writer);
-                         --pr N backfills one PR.
-  swatter init  [flags]  Scaffold the GitHub workflow + set the API-key secret
+  swatter run    [flags]  Review a PR / branch and report findings (CI entry;
+                          driven by the webhook event payload + SWATTER_* env).
+                          On a merged pull_request "closed" event this computes
+                          the feedback/learn preview without committing.
+  swatter learn  [flags]  Learn from merged-PR feedback: score rules from
+                          reactions/replies/resolutions, record gap evidence,
+                          promote repeated patterns, commit the rule book.
+                          --since 72h scans a window (the scheduled sole writer);
+                          --pr N backfills one PR.
+  swatter init   [flags]  Scaffold the GitHub workflow + set the API-key secret
+
+Standalone (run a review locally before wiring up CI):
+  swatter review [effort] [--comment] [<target>]
+                          Review a local checkout with the same pipeline as CI.
+                          effort: auto|low|medium|high|xhigh|max (optional).
+                          target: empty (current branch vs default), a ref/range,
+                          or a PR number/URL. --comment posts to the PR.
+  swatter config <cmd>    Manage ~/.config/swatter/config.json (set|get|list|path)
+                          so you don't have to export SWATTER_* by hand. Env
+                          always overrides the file, so CI is unaffected.
+  swatter doctor [flags]  Verify config, git context, GitHub token, and do one
+                          cheap model round-trip before burning a full review.
 
 Run flags:
   --github-event PATH  webhook payload (default: $GITHUB_EVENT_PATH)
