@@ -1,5 +1,7 @@
 # 🤚 Swatter
 
+**English** · [Tiếng Việt](README.vi.md)
+
 **A PR-review bugbot that swats bugs before they land** — validated findings
 (low noise) and a *living* rule book, built on
 [agentcore](https://github.com/lohi-ai/agentray). BYOK: bring an Anthropic key
@@ -24,6 +26,10 @@ is the #1 complaint. Swatter runs a find-then-verify pipeline instead:
    ([how it works](docs/DESIGN-RULEBOOK.md)).
 
 ## Quickstart
+
+> **New to Swatter? You don't need CI to try it.** Run a full review right on
+> your machine first — see [Standalone CLI](#standalone-cli-try-it-before-ci)
+> below — then wire up the Action once you like what you see.
 
 ```bash
 # in your repo, with the GitHub CLI authenticated:

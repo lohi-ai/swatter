@@ -1,5 +1,7 @@
 # 🤚 Swatter
 
+[English](README.md) · **Tiếng Việt**
+
 **Con bugbot review PR, đập bug trước khi nó kịp lọt vào** — findings đã được
 kiểm chứng (ít nhiễu) cùng một cuốn rule book *sống*, dựng trên
 [agentcore](https://github.com/lohi-ai/agentray). BYOK: mang key Anthropic của
@@ -25,6 +27,10 @@ tìm-rồi-kiểm-chứng:
    ([hoạt động thế nào](docs/DESIGN-RULEBOOK.vi.md)).
 
 ## Quickstart
+
+> **Mới dùng Swatter? Chưa cần CI để thử đâu.** Chạy nguyên một lượt review
+> ngay trên máy trước — xem [CLI standalone](#cli-standalone-thử-trước-khi-gắn-vào-ci)
+> bên dưới — rồi hẵng dựng Action khi đã ưng.
 
 ```bash
 # in your repo, with the GitHub CLI authenticated:
