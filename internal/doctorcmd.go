@@ -45,20 +45,24 @@ func CmdDoctor(args []string) int {
 		pass("base-url=" + cfg.BaseURL)
 	}
 
+	// Resolve the origin remote once — both the git-context check and the token
+	// check need owner/repo, and each lookup shells out to git.
+	owner, repo, originErr := originRepo(ctx, cfg.RepoRoot)
+
 	// (b) git context
 	if _, gerr := git(ctx, cfg.RepoRoot, "rev-parse", "--is-inside-work-tree"); gerr != nil {
 		warn("not a git repo — `swatter review` needs a git checkout")
 	} else {
 		db := defaultBranch(ctx, cfg.RepoRoot)
-		if owner, repo, rerr := originRepo(ctx, cfg.RepoRoot); rerr == nil {
+		if originErr == nil {
 			pass(fmt.Sprintf("git ok — default branch %s, origin %s/%s", db, owner, repo))
 		} else {
-			warn(fmt.Sprintf("git ok — default branch %s, but origin not resolvable (%v); --comment needs a GitHub remote", db, rerr))
+			warn(fmt.Sprintf("git ok — default branch %s, but origin not resolvable (%v); --comment needs a GitHub remote", db, originErr))
 		}
 	}
 
 	// (c) GitHub token
-	if owner, repo, rerr := originRepo(ctx, cfg.RepoRoot); rerr == nil {
+	if originErr == nil {
 		gh, cerr := NewGitHubClientForRepo(owner, repo)
 		switch {
 		case cerr != nil:
@@ -76,9 +80,9 @@ func CmdDoctor(args []string) int {
 	if *noLLM {
 		warn("model round-trip skipped (--no-llm)")
 	} else if rt, terr := modelRoundTrip(ctx, cfg); terr != nil {
-		fail(fmt.Sprintf("model round-trip (%s): %v", cfg.ModelStrong, terr))
+		fail(fmt.Sprintf("model round-trip (%s): %v", cfg.ModelCheap, terr))
 	} else {
-		pass(fmt.Sprintf("model round-trip ok (%s) in %s", cfg.ModelStrong, rt.Round(time.Millisecond)))
+		pass(fmt.Sprintf("model round-trip ok (%s) in %s", cfg.ModelCheap, rt.Round(time.Millisecond)))
 	}
 
 	fmt.Println()
@@ -99,7 +103,7 @@ func modelRoundTrip(ctx context.Context, cfg Config) (time.Duration, error) {
 	}
 	start := time.Now()
 	_, err = deps.provider().Chat(ctx, agentcore.ChatRequest{
-		Model:     cfg.ModelStrong,
+		Model:     cfg.ModelCheap,
 		Messages:  []agentcore.Message{{Role: agentcore.RoleUser, Content: "ping"}},
 		MaxTokens: 8,
 	})
