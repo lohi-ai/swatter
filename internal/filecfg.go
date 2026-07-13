@@ -111,7 +111,12 @@ func saveConfigFile(m map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o600)
+	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	// WriteFile only applies the mode when creating the file; tighten an
+	// existing file too, since it can hold the API key / tokens.
+	return os.Chmod(path, 0o600)
 }
 
 // applyConfigFileDefaults layers the standalone config file *under* the

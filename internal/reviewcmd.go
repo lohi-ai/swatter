@@ -191,7 +191,14 @@ func CmdReview(args []string) int {
 			baseRef = resolveDefaultBase(ctx, cfg.RepoRoot)
 		default:
 			if b, h, ok := parseRange(ra.target); ok {
-				baseRef = b
+				// An omitted side (`..HEAD`, `main..`) falls back to the same
+				// defaults an empty target would use, rather than diffing against
+				// an empty ref.
+				if b != "" {
+					baseRef = b
+				} else {
+					baseRef = resolveDefaultBase(ctx, cfg.RepoRoot)
+				}
 				if h != "" {
 					headRef = h
 				}
