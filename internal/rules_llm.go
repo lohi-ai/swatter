@@ -67,24 +67,57 @@ func (d *runnerDeps) LearnRules(ctx context.Context, packet *Packet, confirmed [
 	return added, nil
 }
 
-// sameRuleJudge returns an LLM-backed SameRuleJudge: a tiny yes/no agent that
-// decides whether two rules express the same pattern (catches paraphrase the
-// normalized prefilter misses — the Litrans-bible near-dup lesson).
+// sameRuleJudge returns an LLM-backed SameRuleJudge: a tiny agent that checks
+// the candidate against the whole book in one call and answers the matching
+// rule's number, or NONE (catches paraphrase the normalized prefilter misses —
+// the Litrans-bible near-dup lesson). One call per candidate instead of one
+// per (candidate, rule) pair; the book is ≤4KB, well inside the judge budget.
 func (d *runnerDeps) sameRuleJudge() SameRuleJudge {
-	return func(ctx context.Context, a, b string) (bool, error) {
-		soul := "You judge whether two code-review rules express the SAME underlying pattern (one a paraphrase, generalization, or subset of the other). Answer with a single word: YES or NO."
+	return func(ctx context.Context, cand string, existing []string) (int, error) {
+		soul := "You judge whether a CANDIDATE code-review rule expresses the SAME underlying pattern as any rule in a numbered list (one a paraphrase, generalization, or subset of the other). Answer with the matching rule's number alone, or the single word NONE."
 		ag, err := d.roleAgent(d.cfg.ModelCheap, soul, "", d.cfg.EffortProfile().Limits.Judge)
 		if err != nil {
-			return false, err
+			return -1, err
 		}
-		input := fmt.Sprintf("Rule A: %s\nRule B: %s\n\nSame pattern? Answer YES or NO.", a, b)
+		var b strings.Builder
+		fmt.Fprintf(&b, "Candidate rule: %s\n\nExisting rules:\n", cand)
+		for i, r := range existing {
+			fmt.Fprintf(&b, "%d. %s\n", i+1, r)
+		}
+		b.WriteString("\nSame pattern as any existing rule? Answer its number, or NONE.")
 		ctx = agentcore.WithTraceID(ctx, "dedup")
-		r, err := d.run(ctx, ag, input)
+		r, err := d.run(ctx, ag, b.String())
 		if err != nil {
-			return false, err
+			return -1, err
 		}
-		return strings.Contains(strings.ToUpper(r.Final), "YES"), nil
+		return parseJudgeMatch(r.Final, len(existing)), nil
 	}
+}
+
+// parseJudgeMatch reads the judge's reply: the first integer in [1, n] wins
+// (0-indexed on return); anything else — NONE, prose, an out-of-range number —
+// means no match. A malformed reply therefore fails open to "insert", the same
+// bias as the old YES/NO judge's substring check.
+func parseJudgeMatch(reply string, n int) int {
+	num, inNum := 0, false
+	flush := func() int {
+		if inNum && num >= 1 && num <= n {
+			return num - 1
+		}
+		return -1
+	}
+	for _, r := range reply {
+		if r >= '0' && r <= '9' {
+			num = num*10 + int(r-'0')
+			inNum = true
+			continue
+		}
+		if m := flush(); m >= 0 {
+			return m
+		}
+		num, inNum = 0, false
+	}
+	return flush()
 }
 
 func parseLearnedRules(raw string) []learnedRule {

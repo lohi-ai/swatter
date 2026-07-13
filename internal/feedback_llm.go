@@ -65,7 +65,14 @@ func (d *runnerDeps) clusterObservations(ctx context.Context, ledger *ObsLedger,
 // noisy PR can never mint a rule on its own. Promoted (or already-covered)
 // members leave the ledger; everything else stays and keeps accumulating.
 // Returns the number of rules inserted. Mutates ledger and store in place.
+//
+// The clustering call only runs when the ledger as a whole could clear the
+// gate (PromotionPossible) — a thin ledger can't mint a rule no matter how the
+// model groups it, so the tokens would buy nothing.
 func (d *runnerDeps) PromoteObservations(ctx context.Context, ledger *ObsLedger, store *RuleStore, promoteAfter int) (int, error) {
+	if !ledger.PromotionPossible(promoteAfter) {
+		return 0, nil
+	}
 	proposals, err := d.clusterObservations(ctx, ledger, store)
 	if err != nil {
 		return 0, err

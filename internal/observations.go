@@ -234,6 +234,21 @@ func (l *ObsLedger) Prune(now time.Time) {
 	}
 }
 
+// PromotionPossible reports whether any subset of the ledger could clear the
+// promotion gate. Total weight ≥ promoteAfter across ≥ 2 distinct PRs is a
+// necessary condition for any cluster (a cluster's members are a subset of the
+// ledger), so when the whole ledger fails it, the clustering LLM call is
+// provably wasted and the caller skips it.
+func (l *ObsLedger) PromotionPossible(promoteAfter int) bool {
+	weight := 0
+	prs := map[int]bool{}
+	for _, o := range l.Obs {
+		weight += o.Weight()
+		prs[o.PR] = true
+	}
+	return weight >= promoteAfter && len(prs) >= 2
+}
+
 // ClusterEvidence checks a proposed cluster against the ledger: it keeps only
 // member ids that actually exist, and returns their total weight and how many
 // distinct PRs they span. The promotion decision is the harness's — the

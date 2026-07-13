@@ -122,6 +122,27 @@ func spentIdentityOf(o Observation) obsIdentity {
 	return o.identity()
 }
 
+// PromotionPossible is the necessary-condition gate in front of the clustering
+// LLM call: enough total weight AND at least two distinct PRs.
+func TestObsLedgerPromotionPossible(t *testing.T) {
+	l := &ObsLedger{}
+	if l.PromotionPossible(3) {
+		t.Fatal("empty ledger cannot promote")
+	}
+	l.Add(Observation{Kind: ObsMissed, PR: 1, Date: "2026-07-14", Note: "missed nil check on decode"}) // weight 2
+	l.Add(Observation{Kind: ObsRepeat, PR: 1, Date: "2026-07-14", Note: "repeat: unchecked error"})    // weight 1
+	if l.PromotionPossible(3) {
+		t.Fatal("weight 3 from a single PR must not pass (needs ≥ 2 distinct PRs)")
+	}
+	l.Add(Observation{Kind: ObsRepeat, PR: 2, Date: "2026-07-14", Note: "another unchecked error"}) // weight 1, second PR
+	if !l.PromotionPossible(3) {
+		t.Fatal("weight 4 across 2 PRs must pass")
+	}
+	if l.PromotionPossible(5) {
+		t.Fatal("threshold above total weight must not pass")
+	}
+}
+
 func TestObsLedgerEmptyRender(t *testing.T) {
 	l := ParseObsLedger("")
 	if len(l.Obs) != 0 {

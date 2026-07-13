@@ -150,28 +150,34 @@ func (rs *RuleStore) Render() string {
 	return b.String()
 }
 
-// SameRuleJudge decides whether two rules express the same pattern. Production
-// wires an LLM judge (semantic, catches paraphrase); tests inject a fake. It is
-// only consulted after a cheap normalized-equality prefilter.
-type SameRuleJudge func(ctx context.Context, a, b string) (bool, error)
+// SameRuleJudge decides whether a candidate rule expresses the same pattern as
+// any rule in existing: it returns the index of the matching rule, or -1 when
+// the candidate is genuinely new. Production wires an LLM judge that decides
+// against the whole book in one call (the book is ≤4KB, so one call replaces
+// one-per-rule); tests inject a fake. It is only consulted after a cheap
+// normalized-equality prefilter.
+type SameRuleJudge func(ctx context.Context, cand string, existing []string) (int, error)
 
 // Insert adds a candidate rule unless it duplicates an existing one. The
 // normalized-text prefilter catches trivial repeats for free; the judge catches
-// paraphrase. Returns whether the rule was actually inserted.
+// paraphrase in a single call over the whole book. Returns whether the rule was
+// actually inserted.
 func (rs *RuleStore) Insert(ctx context.Context, cand Rule, judge SameRuleJudge) (bool, error) {
 	candNorm := normalizeRule(cand.Rule)
-	for _, existing := range rs.Rules {
-		if normalizeRule(existing.Rule) == candNorm {
+	existing := make([]string, 0, len(rs.Rules))
+	for _, r := range rs.Rules {
+		if normalizeRule(r.Rule) == candNorm {
 			return false, nil // exact/normalized dup
 		}
-		if judge != nil {
-			same, err := judge(ctx, existing.Rule, cand.Rule)
-			if err != nil {
-				return false, err
-			}
-			if same {
-				return false, nil // semantic dup (paraphrase)
-			}
+		existing = append(existing, r.Rule)
+	}
+	if judge != nil && len(existing) > 0 {
+		match, err := judge(ctx, cand.Rule, existing)
+		if err != nil {
+			return false, err
+		}
+		if match >= 0 {
+			return false, nil // semantic dup (paraphrase)
 		}
 	}
 	if cand.Confidence == 0 {

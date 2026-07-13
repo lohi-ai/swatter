@@ -4,8 +4,9 @@ name: swatter-learn
 # missed bugs) into .swatter/{rules,pending}.md. This scheduled job is the SOLE
 # writer of the rule book — a single writer means concurrent merges never race
 # on the file. The window overlaps the daily cadence (72h > 24h) so a skipped or
-# failed run self-heals: per-PR scoring is idempotent, so re-scanning a PR folds
-# its feedback in exactly once.
+# failed run self-heals: a PR whose feedback was already folded in is skipped
+# outright (RuleStore.HasScored), so the overlap costs nothing. Scoring is
+# deterministic; the batch runs at most one clustering LLM call per branch.
 on:
   schedule:
     - cron: '0 0 * * *' # 00:00 UTC daily

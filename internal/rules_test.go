@@ -39,10 +39,18 @@ func TestRuleStore_InsertDedupsParaphrase(t *testing.T) {
 	}}
 	// A fake semantic judge that treats anything mentioning "validate" + "input"
 	// as the same rule — stands in for the LLM paraphrase catcher.
-	judge := func(_ context.Context, a, b string) (bool, error) {
-		// Same rule iff BOTH texts are about validating input — a stand-in for
-		// the LLM catching paraphrase while leaving unrelated rules distinct.
-		return aboutValidation(a) && aboutValidation(b), nil
+	judge := func(_ context.Context, cand string, existing []string) (int, error) {
+		// Match iff BOTH texts are about validating input — a stand-in for the
+		// LLM catching paraphrase while leaving unrelated rules distinct.
+		if !aboutValidation(cand) {
+			return -1, nil
+		}
+		for i, e := range existing {
+			if aboutValidation(e) {
+				return i, nil
+			}
+		}
+		return -1, nil
 	}
 	// Exact-normalized dup: rejected without the judge.
 	added, _ := rs.Insert(context.Background(), Rule{Rule: "always validate USER input before the db query"}, nil)
@@ -152,6 +160,30 @@ func TestRuleStore_CompactEvictsByScore(t *testing.T) {
 	// The highest-scoring rule must survive.
 	if _, ok := ruleIDs(rs)["r-a0"]; !ok {
 		t.Fatalf("strongest rule evicted; survivors: %v", ruleIDs(rs))
+	}
+}
+
+// parseJudgeMatch reads the batch dedup judge's reply: first in-range number
+// wins, anything else fails open to "no match" (insert).
+func TestParseJudgeMatch(t *testing.T) {
+	cases := []struct {
+		reply string
+		n     int
+		want  int
+	}{
+		{"3", 5, 2},
+		{"Rule 2.", 5, 1},
+		{"NONE", 5, -1},
+		{"none of these match", 5, -1},
+		{"12", 3, -1}, // out of range
+		{"0", 3, -1},  // rules are 1-indexed
+		{"", 3, -1},   // empty reply fails open
+		{"7. yes", 3, -1},
+	}
+	for _, c := range cases {
+		if got := parseJudgeMatch(c.reply, c.n); got != c.want {
+			t.Errorf("parseJudgeMatch(%q, %d) = %d, want %d", c.reply, c.n, got, c.want)
+		}
 	}
 }
 

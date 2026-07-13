@@ -176,6 +176,14 @@ permissions:
 
 jobs:
   review:
+    # Same-repo PRs only: on the pull_request event a fork PR gets a read-only
+    # token and no secrets, so an auto-review can't post — skip it instead of
+    # burning a runner that exits neutral. (closed still runs the post-merge
+    # learn flow.) To review fork PRs on a public repo, use on-demand mode,
+    # where a maintainer's "@swatter review" comment runs with a write token.
+    if: >-
+      github.event.action == 'closed' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,9 +196,12 @@ jobs:
 
 // onDemandWorkflow reviews on PR open/reopen and on a "@swatter review" comment
 // from a trusted commenter (OWNER/MEMBER/COLLABORATOR) — not on every push. The
-// comment payload has no PR head, so it checks out refs/pull/N/head. `closed`
-// still runs the post-merge learn flow. The concurrency group falls back to the
-// issue number on comment events (both resolve to the PR number).
+// auto-run is gated to same-repo PRs; fork PRs (read-only token, no secrets on
+// pull_request) don't auto-review but a maintainer's "@swatter review" comment
+// reviews them with a write token. The comment payload has no PR head, so it
+// checks out refs/pull/N/head. `closed` still runs the post-merge learn flow.
+// The concurrency group falls back to the issue number on comment events (both
+// resolve to the PR number).
 const onDemandWorkflow = `name: swatter
 on:
   pull_request:
@@ -210,7 +221,9 @@ permissions:
 jobs:
   review:
     if: >-
-      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request' &&
+       (github.event.action == 'closed' ||
+        github.event.pull_request.head.repo.full_name == github.repository)) ||
       (github.event.issue.pull_request &&
        contains(github.event.comment.body, '@swatter review') &&
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))

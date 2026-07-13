@@ -26,6 +26,11 @@ permissions:
 
 jobs:
   review:
+    # Same-repo PRs only. On a public repo a fork PR gets a read-only token and
+    # no secrets, so auto-review can't post — gate it out here rather than spin
+    # up a runner that exits neutral. See "Fork PRs" below to review them on
+    # demand.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -165,12 +170,17 @@ on:
 
 jobs:
   review:
-    # PR events, or a "@swatter review" comment from a trusted commenter.
-    # The author_association gate matters: issue_comment runs with a *write*
-    # token even on fork PRs, so without it any drive-by commenter could spend
-    # your tokens (and trigger a checkout of untrusted head).
+    # Auto-run on same-repo PRs (closed still runs the learn flow), or a
+    # "@swatter review" comment from a trusted commenter. Two gates matter on a
+    # public repo: the head-repo check keeps fork PRs from auto-running (their
+    # token is read-only, so it can't post anyway), and the author_association
+    # check is essential because issue_comment runs with a *write* token even on
+    # fork PRs — without it any drive-by commenter could spend your tokens (and
+    # trigger a checkout of untrusted head).
     if: >-
-      github.event_name == 'pull_request' ||
+      (github.event_name == 'pull_request' &&
+       (github.event.action == 'closed' ||
+        github.event.pull_request.head.repo.full_name == github.repository)) ||
       (github.event.issue.pull_request &&
        contains(github.event.comment.body, '@swatter review') &&
        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
@@ -190,8 +200,9 @@ jobs:
 The reporter reuses the same sticky comment, so a re-trigger updates the
 existing review in place instead of stacking comments. Because `issue_comment`
 runs in the base-repo context with a write token, this is also the way to review
-a **fork** PR on demand — the auto-run on `opened` skips forks (their token is
-read-only), but a maintainer's `@swatter review` reviews it.
+a **fork** PR on demand — the auto-run is gated to same-repo PRs (a fork's token
+is read-only and carries no secrets, so it couldn't post anyway), but a
+maintainer's `@swatter review` reviews it.
 
 ## Path-filtered review
 
@@ -215,8 +226,26 @@ on:
 
 ## Fork PRs
 
-The default `pull_request` trigger gives fork PRs a **read-only** token and no
-secrets — Swatter detects this and exits neutral (no red check) rather than
-failing. Do **not** switch to `pull_request_target` to work around it: that runs
-with your secrets against attacker-controlled code. If you must review fork PRs,
-gate on a maintainer label and review the code first.
+On a public repo the `pull_request` trigger gives fork PRs a **read-only** token
+and no secrets, so an auto-review can't post. Gate the job to same-repo PRs so a
+fork PR doesn't even spin up a runner:
+
+```yaml
+jobs:
+  review:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+```
+
+(As a backstop, Swatter also detects a read-only token at runtime and exits
+neutral — no red check — rather than failing, so an ungated workflow is still
+safe, just noisier.)
+
+To actually review a fork PR, have a maintainer trigger it with a comment —
+`swatter init --mode on-demand` (or the [`@swatter review`](#swatter-review-re-trigger-on-demand-mode)
+recipe). The `issue_comment` event runs in the base-repo context with a write
+token, and the `author_association` gate limits it to OWNER/MEMBER/COLLABORATOR,
+so a maintainer vouches for the code before Swatter runs on it.
+
+Do **not** switch to `pull_request_target` to auto-review forks: it runs with
+your secrets and a write token against attacker-controlled code — the classic
+public-repo secret-exfiltration hole.

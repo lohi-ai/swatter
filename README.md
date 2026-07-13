@@ -54,6 +54,10 @@ permissions:
   checks: write
 jobs:
   review:
+    # Same-repo PRs only. On public repos a fork PR gets a read-only token and
+    # no secrets, so auto-review can't post — see docs/recipes.md for reviewing
+    # fork PRs on demand.
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

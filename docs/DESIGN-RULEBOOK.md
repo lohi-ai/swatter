@@ -46,7 +46,10 @@ new.
    - a normalized-text match (lowercased, punctuation-folded) is a free reject;
    - otherwise an LLM *same-pattern judge* catches paraphrase, generalization,
      and subset relationships (an exact-match-only guard silently accumulates
-     near-duplicates — the lesson from the Litrans bible dedup work).
+     near-duplicates — the lesson from the Litrans bible dedup work). The
+     judge sees the candidate against the whole book (≤4 KB) in **one call**
+     and answers the matching rule's number or NONE — never one call per
+     (candidate, rule) pair.
 3. **Score.** Every review updates counts from that run's outcome:
    - a rule id cited by a **surviving** finding → `hits++`, `last_hit=today`,
      confidence rises toward 1 (`c += (1-c)·0.1`);
@@ -70,10 +73,21 @@ adds the human signal from **merged PRs**. It runs on a **daily schedule**
 (`swatter learn --since 72h`), not per merge: a single scheduled job scans every
 PR merged in the lookback window, which makes it the **sole writer** of the rule
 book so concurrent merges never race on the file. The window overlaps the daily
-cadence, and per-PR scoring is idempotent (`RuleStore.HasScored`), so a missed
-run self-heals and no PR is ever double-scored. (A merged `pull_request`
-`closed` event can still run the flow in *compute-only* mode for a per-merge
-preview — it never commits; the schedule is the only writer.) Per PR:
+cadence so a missed run self-heals; a PR the book already marks scored
+(`RuleStore.HasScored`) is **skipped before its comments are even listed**, so
+the overlap never re-bills — no PR is ever double-scored or double-read. (A
+merged `pull_request` `closed` event can still run the flow in *compute-only*
+mode for a per-merge preview — it never commits; the schedule is the only
+writer.)
+
+The batch is shaped so LLM cost stays flat as PR volume grows: PRs are grouped
+by base branch; per branch the job reads the book + ledger **once**, folds
+every PR's feedback deterministically (steps 1–2 below cost zero tokens), then
+runs the **one** clustering pass of step 3 — and only when this run actually
+added a new observation AND the ledger's total evidence could clear the
+promotion gate (weight ≥ threshold across ≥ 2 distinct PRs is a necessary
+condition checked before the call). Each file is committed once per branch.
+Per PR:
 
 1. **Read-back.** Every inline comment Swatter posts embeds an invisible
    marker (`<!-- swatter:finding {"rule_ids":[…],"summary":…} -->`). Swatter
@@ -93,13 +107,13 @@ preview — it never commits; the schedule is the only writer.) Per PR:
      missed, when it was acted on — line changed, thread resolved, or an
      affirming reply (`missed`, weight 2).
    Observations age out after 120 days and the ledger is capped at 60 entries.
-3. **Conservative promotion.** One clustering pass groups same-pattern
-   observations (and discards nits/questions/chatter). A cluster becomes a
-   rule only when its harness-verified evidence reaches weight ≥ 3
-   (`SWATTER_RULE_PROMOTE_AFTER`) across **≥ 2 distinct PRs** — one noisy PR
-   can never mint a rule. Promoted rules start at confidence 0.7 (below
-   validator-learned rules) and pass the same dedup judge; spent observations
-   leave the ledger.
+3. **Conservative promotion.** One clustering pass **per branch per run** (not
+   per PR) groups same-pattern observations (and discards
+   nits/questions/chatter). A cluster becomes a rule only when its
+   harness-verified evidence reaches weight ≥ 3 (`SWATTER_RULE_PROMOTE_AFTER`)
+   across **≥ 2 distinct PRs** — one noisy PR can never mint a rule. Promoted
+   rules start at confidence 0.7 (below validator-learned rules) and pass the
+   same dedup judge; spent observations leave the ledger.
 
 ## Write-back
 
