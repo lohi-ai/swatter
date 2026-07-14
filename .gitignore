@@ -1,5 +1,6 @@
 /swatter
 /out/
+/.babysit/
 *.test
 cookies.txt
 .env

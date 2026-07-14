@@ -85,6 +85,11 @@ type Config struct {
 // It validates the minimum required inputs (api key, a strong model) and
 // applies the documented defaults.
 func LoadConfig() (Config, error) {
+	// Fill any unset SWATTER_* from the standalone config file before reading the
+	// environment. The environment always wins, so CI (env set, no file) is
+	// unchanged; a local `swatter config`-only setup resolves the same Config.
+	applyConfigFileDefaults()
+
 	c := Config{
 		Provider:        Provider(envDefault("SWATTER_PROVIDER", string(ProviderAnthropic))),
 		APIKey:          os.Getenv("SWATTER_API_KEY"),

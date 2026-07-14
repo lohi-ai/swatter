@@ -1,6 +1,8 @@
 # 🤚 Swatter
 
-**Con bugbot review PR, đập bug trước khi nó kịp lọt vào** — findings đã được
+[English](README.md) · **Tiếng Việt**
+
+**Con bugbot review PR, đập bug trước khi nó kịp lọt vào** — findings đã qua
 kiểm chứng (ít nhiễu) cùng một cuốn rule book *sống*, dựng trên
 [agentcore](https://github.com/lohi-ai/agentray). BYOK: mang key Anthropic của
 bạn, hoặc trỏ vào bất kỳ gateway nào tương thích OpenAI (9router, OpenRouter,
@@ -26,9 +28,13 @@ tìm-rồi-kiểm-chứng:
 
 ## Quickstart
 
+> **Mới dùng Swatter? Chưa cần CI để thử đâu.** Chạy nguyên một lượt review
+> ngay trên máy trước — xem [CLI standalone](#cli-standalone-thử-trước-khi-gắn-vào-ci)
+> bên dưới — rồi hẵng dựng Action khi đã ưng.
+
 ```bash
-# in your repo, with the GitHub CLI authenticated:
-swatter init          # asks provider/model + review trigger, writes the workflow, sets the secret
+# trong repo của bạn, GitHub CLI đã đăng nhập:
+swatter init          # hỏi provider/model + kiểu trigger review, ghi workflow, set secret
 ```
 
 `init` sẽ hỏi bạn muốn trigger review kiểu nào:
@@ -74,6 +80,41 @@ Mở một PR — Swatter post comment inline, một comment tổng kết, và m
 theo path, chế độ advisory, an toàn với fork-PR) trong
 [docs/recipes.vi.md](docs/recipes.vi.md).
 
+## CLI standalone (thử trước khi gắn vào CI)
+
+Muốn xem Swatter chạy trên code của bạn trước khi dựng workflow? Chạy review
+ngay tại máy. Lưu key một lần, kiểm tra provider có trả lời không, rồi review
+nhánh hiện tại:
+
+```bash
+swatter config set api-key sk-…       # lưu 0600 vào ~/.config/swatter/config.json
+swatter doctor                        # soi config, git, GitHub token + một cú gọi model rẻ để thử
+swatter review                        # review nhánh hiện tại so với nhánh mặc định → stdout
+swatter review high                   # ép mức effort (auto|low|medium|high|xhigh|max)
+swatter review main..HEAD             # review một range git cụ thể (three-dot / merge-base)
+swatter review low --comment 42       # review và post finding lên PR #42 (cần GitHub token)
+```
+
+- **`swatter config set|get|list|path`** quản lý `~/.config/swatter/config.json`
+  (tôn trọng `$XDG_CONFIG_HOME`) để bạn khỏi export `SWATTER_*` bằng tay. Các
+  key: `api-key`, `provider`, `base-url`, `model`, `model-cheap`, `effort`,
+  `fail-on`, `github-token`, `resolve-token`. File nằm **dưới** environment —
+  biến `SWATTER_*` đã set luôn thắng — nên CI (vốn set env và không có file) không
+  hề hấn gì. `config list` che các giá trị bí mật.
+- **`swatter doctor`** soi lại config, kiểm tra git và (nếu có token) quyền
+  GitHub, rồi gọi model một cú nhỏ xíu — key hay gateway sai là báo lỗi ngay,
+  khỏi chết ngang giữa lượt review. `--no-llm` thì bỏ qua cú gọi đó.
+- **`swatter review [effort] [--comment] [<target>]`** chạy đúng pipeline
+  find-then-verify như CI. `<target>` để trống (nhánh hiện tại so với merge-base
+  với nhánh mặc định), một ref/range git, hoặc số/URL của PR. Không có
+  `--comment` thì finding in ra stdout (`--format json` cho output máy đọc).
+  `--comment` post lên PR y như CI — hãy checkout nhánh của PR trước để comment
+  inline neo đúng commit, và set GitHub token (`swatter config set github-token …`
+  hoặc `GITHUB_TOKEN`).
+
+`run`/`learn`/`init` và GitHub Action giữ nguyên — CLI chỉ là một cửa vào mới
+trên cùng một engine, không phải bản thay thế.
+
 ## Configuration
 
 | Input | Mặc định | Ghi chú |
@@ -83,11 +124,12 @@ theo path, chế độ advisory, an toàn với fork-PR) trong
 | `base_url` | — | bắt buộc với `openai-compat`. |
 | `model` | `claude-opus-4-8`\* | tier mạnh (góc bug/security, diff lớn). |
 | `model_cheap` | = `model` | tier rẻ hơn cho mấy góc dọn dẹp trên diff nhỏ. |
-| `effort` | `high` | mức review: `low` (1 lượt diff → không verify → ≤4 findings), `medium` (3+5 góc × 6 → verify → ≤8, thiên precision), `high` (cùng fan-out, thiên recall → ≤10), `xhigh` (5+5 góc × 8 → verify → quét → ≤15), `max` (xhigh + reasoning effort của API). Mỗi mức còn hard-cap token cho từng agent — `high` giữ mỗi agent dưới 120K. |
+| `effort` | `auto` | mức review: `auto` (tự liệu theo diff: ≤3 file & ≤50 dòng → `low`, ≤10 & ≤300 → `medium`, ≤25 & ≤1000 → `high`, to hơn → `xhigh`), `low` (1 lượt diff → không verify → ≤4 findings), `medium` (3+5 góc × 6 → verify → ≤8, thiên precision), `high` (cùng fan-out, thiên recall → ≤10), `xhigh` (5+5 góc × 8 → verify → quét → ≤15), `max` (xhigh + reasoning effort của API). Mỗi mức còn hard-cap token cho từng agent — `high` giữ mỗi agent dưới 120K. |
 | `fail_on` | `never` | mặc định là advisory (check xanh + comment). Đặt `critical`/`major`/`any` để chặn merge — check `Swatter` chuyển đỏ khi có finding đã xác nhận. |
 | `max_usd` | `5` | trần chi tiêu mỗi PR (với model có giá). |
 | `max_tokens_total` | `8000000` | trần lúc nào cũng chặn được, cho model không rõ giá. |
 | `price_per_mtok_in`/`_out` | `0` | dạy cho ledger biết giá của một model tự chọn. |
+| `resolve_token` | — | PAT (pull-requests: write) tùy chọn, **chỉ** để resolve mấy review thread cũ qua các vòng. `GITHUB_TOKEN` mặc định làm không nổi (`Resource not accessible by integration`); thiếu nó thì thread của finding đã sửa cứ nằm đó (dedup vẫn chạy). |
 
 \* Không có mặc định cho `openai-compat` — tự đặt tên model của gateway.
 
@@ -99,6 +141,13 @@ không network tool, không GitHub token. Findings là JSON có kiểu, do harne
 render ra; harness mới là chỗ giữ token và lo hết phần post. Một chỉ thị lén
 nhét vào body của PR không thể bắt con bot post, tuồn data, hay chạy bất cứ thứ
 gì.
+
+Swatter khoanh vùng và ghi sổ đàng hoàng từng GitHub token: mỗi lần chạy, nó in
+một **token preflight** ra Action log, nói rõ token nào làm gì — `GITHUB_TOKEN`
+của harness (check run, comment, đọc thread) và, nếu có set, `resolve_token` PAT
+(**không xài vào việc gì** ngoài `resolveReviewThread`) — rồi kiểm tra từng cái
+chạy được, để maintainer thấy đúng credential của mình dùng vào đâu, khỏi đâm
+phải một lỗi permission mù mờ giữa chừng review.
 
 ## Development
 

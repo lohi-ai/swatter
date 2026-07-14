@@ -1,5 +1,7 @@
 # 🤚 Swatter
 
+**English** · [Tiếng Việt](README.vi.md)
+
 **A PR-review bugbot that swats bugs before they land** — validated findings
 (low noise) and a *living* rule book, built on
 [agentcore](https://github.com/lohi-ai/agentray). BYOK: bring an Anthropic key
@@ -24,6 +26,10 @@ is the #1 complaint. Swatter runs a find-then-verify pipeline instead:
    ([how it works](docs/DESIGN-RULEBOOK.md)).
 
 ## Quickstart
+
+> **New to Swatter? You don't need CI to try it.** Run a full review right on
+> your machine first — see [Standalone CLI](#standalone-cli-try-it-before-ci)
+> below — then wire up the Action once you like what you see.
 
 ```bash
 # in your repo, with the GitHub CLI authenticated:
@@ -71,6 +77,41 @@ jobs:
 Open a PR — Swatter posts inline comments, a summary comment, and a **Swatter**
 check run. More patterns (gateways, `@swatter review` re-trigger, path filters,
 advisory mode, fork-PR safety) in [docs/recipes.md](docs/recipes.md).
+
+## Standalone CLI (try it before CI)
+
+Want to see Swatter on your code before wiring up a workflow? Run a review
+locally. Store your key once, verify the provider answers, then review your
+current branch:
+
+```bash
+swatter config set api-key sk-…       # saved 0600 to ~/.config/swatter/config.json
+swatter doctor                        # checks config, git, GitHub token + one cheap model call
+swatter review                        # review the current branch vs the default branch → stdout
+swatter review high                   # force an effort level (auto|low|medium|high|xhigh|max)
+swatter review main..HEAD             # review an explicit git range (three-dot / merge-base)
+swatter review low --comment 42       # review and post findings to PR #42 (needs a GitHub token)
+```
+
+- **`swatter config set|get|list|path`** manages `~/.config/swatter/config.json`
+  (honors `$XDG_CONFIG_HOME`) so you don't export `SWATTER_*` by hand. Keys:
+  `api-key`, `provider`, `base-url`, `model`, `model-cheap`, `effort`,
+  `fail-on`, `github-token`, `resolve-token`. The file is layered **under** the
+  environment — a set `SWATTER_*` var always wins — so CI (which sets the env
+  and ships no file) is unaffected. `config list` redacts secrets.
+- **`swatter doctor`** validates your config, checks the git context and (if a
+  token is present) GitHub access, and does one tiny model round-trip so a bad
+  key or gateway fails fast instead of mid-review. `--no-llm` skips the call.
+- **`swatter review [effort] [--comment] [<target>]`** runs the same
+  find-then-verify pipeline as CI. `<target>` is empty (current branch vs its
+  merge-base with the default branch), a git ref/range, or a PR number/URL.
+  Without `--comment`, findings print to stdout (`--format json` for machine
+  output). `--comment` posts to the PR exactly as CI does — check out the PR
+  branch first so inline comments anchor to the right commit, and set a GitHub
+  token (`swatter config set github-token …` or `GITHUB_TOKEN`).
+
+`run`/`learn`/`init` and the GitHub Action are unchanged — the CLI is a new
+front door on the same engine, not a replacement.
 
 ## Configuration
 
