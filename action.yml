@@ -104,8 +104,8 @@ inputs:
       stale review threads when a finding is fixed across review rounds. The
       default GITHUB_TOKEN cannot resolve threads ("Resource not accessible by
       integration"), so without this, fixed findings' threads stay open (dedup
-      of persistent findings still works). Pass a secret, e.g.
-      ${{ secrets.SWATTER_RESOLVE_TOKEN }}.
+      of persistent findings still works). Wire it in the workflow from a
+      secret, e.g. resolve_token set to secrets.SWATTER_RESOLVE_TOKEN.
     required: false
     default: ''
 
