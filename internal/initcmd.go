@@ -98,6 +98,12 @@ func CmdInit(args []string) int {
 		fmt.Println("  2. (optional) Require the \"Swatter\" check under Settings → Branches →")
 		fmt.Println("     Branch protection to block merges on confirmed findings.")
 	}
+	fmt.Println("  · (optional) Auto-resolve a finding's review thread once it's fixed in a")
+	fmt.Println("     later push: add `resolve_token: ${{ secrets.SWATTER_RESOLVE_TOKEN }}` to")
+	fmt.Println("     the workflow's `with:` block and set that secret to a token with BOTH")
+	fmt.Println("     pull-requests:write and contents:read+write (a fine-grained PAT with both,")
+	fmt.Println("     a classic 'repo' PAT, or a GitHub App). The default GITHUB_TOKEN can't")
+	fmt.Println("     resolve threads, so without it fixed findings' threads just stay open.")
 	return 0
 }
 
