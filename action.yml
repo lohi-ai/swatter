@@ -100,12 +100,14 @@ inputs:
     default: ${{ github.token }}
   resolve_token:
     description: >-
-      Optional PAT (or App token) with pull-requests write used ONLY to resolve
-      stale review threads when a finding is fixed across review rounds. The
-      default GITHUB_TOKEN cannot resolve threads ("Resource not accessible by
-      integration"), so without this, fixed findings' threads stay open (dedup
-      of persistent findings still works). Wire it in the workflow from a
-      secret, e.g. resolve_token set to secrets.SWATTER_RESOLVE_TOKEN.
+      Optional token used ONLY to resolve stale review threads when a finding is
+      fixed across review rounds. It needs BOTH pull-requests:write and
+      contents:read+write — a fine-grained PAT with both, a classic repo-scope
+      PAT, or a GitHub App token. The default GITHUB_TOKEN cannot resolve threads
+      ("Resource not accessible by integration") and pull-requests:write alone is
+      also rejected, so without a capable token here, fixed findings' threads stay
+      open (dedup of persistent findings still works). Wire it in the workflow
+      from a secret, e.g. resolve_token set to secrets.SWATTER_RESOLVE_TOKEN.
     required: false
     default: ''
 

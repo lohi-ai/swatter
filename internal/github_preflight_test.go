@@ -21,7 +21,8 @@ func TestPreflightRender_MissingResolve(t *testing.T) {
 		"resolve stale threads ONLY [not set]",
 		"primary token ok (Actions/App installation token)",
 		"resolve token MISSING",
-		"pull-requests: write",
+		"pull-requests:write",
+		"contents:read+write",
 		"nothing but resolveReviewThread",
 	} {
 		if !strings.Contains(out, want) {

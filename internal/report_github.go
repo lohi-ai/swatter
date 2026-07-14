@@ -133,13 +133,15 @@ func (r *Reporter) Finish(ctx context.Context, res Result, packet *Packet) error
 	// Resolve stale threads (finding gone this round). Best-effort, per the same
 	// contract as the inline post: a failure — e.g. the token can't resolve a
 	// thread it authored — is a progress note, never a failed check run.
-	// Resolution needs a PAT (SWATTER_RESOLVE_TOKEN): the default GITHUB_TOKEN is
-	// rejected by resolveReviewThread. Without one, skip the loop rather than fire
+	// Resolution needs SWATTER_RESOLVE_TOKEN with pull-requests:write AND
+	// contents:read+write: the default GITHUB_TOKEN is rejected by
+	// resolveReviewThread, and so is a token with only pull-requests:write.
+	// Without a capable token, skip the loop rather than fire
 	// calls that always fail — dedup already kept the persistent findings from
 	// re-posting; the stale threads just stay open.
 	if len(toResolve) > 0 && !r.gh.CanResolveThreads() {
-		r.Progress(fmt.Sprintf("%d stale thread(s) left open — set resolve_token (PAT) to auto-resolve", len(toResolve)))
-		fmt.Fprintf(os.Stderr, "swatter: reconcile: %d stale thread(s) not resolved — no SWATTER_RESOLVE_TOKEN (GITHUB_TOKEN cannot resolve threads)\n", len(toResolve))
+		r.Progress(fmt.Sprintf("%d stale thread(s) left open — set resolve_token (pull-requests:write + contents:read+write) to auto-resolve", len(toResolve)))
+		fmt.Fprintf(os.Stderr, "swatter: reconcile: %d stale thread(s) not resolved — no SWATTER_RESOLVE_TOKEN (GITHUB_TOKEN cannot resolve threads; the token needs pull-requests:write + contents:read+write)\n", len(toResolve))
 		toResolve = nil
 	}
 	resolved := 0

@@ -166,10 +166,12 @@ func (p TokenPreflight) Render() []string {
 	case !p.ResolveSet:
 		lines = append(lines,
 			"preflight: resolve token MISSING -> stale threads will be left open, not resolved.",
-			"           Set a PAT (pull-requests: write) as SWATTER_RESOLVE_TOKEN to enable.",
-			"           Swatter uses it for nothing but resolveReviewThread.")
+			"           Set SWATTER_RESOLVE_TOKEN to a token with BOTH pull-requests:write and",
+			"           contents:read+write — a fine-grained PAT with both, a classic 'repo' PAT,",
+			"           or a GitHub App token. (pull-requests:write alone is rejected; so is the",
+			"           default GITHUB_TOKEN.) Swatter uses it for nothing but resolveReviewThread.")
 	case !p.ResolveOK:
-		lines = append(lines, fmt.Sprintf("preflight: resolve token INVALID (%s) — stale threads will be left open; check the PAT", p.ResolveErr))
+		lines = append(lines, fmt.Sprintf("preflight: resolve token INVALID (%s) — stale threads left open; needs pull-requests:write + contents:read+write", p.ResolveErr))
 	default:
 		lines = append(lines, fmt.Sprintf("preflight: resolve token ok (acting as %s) — used only for resolveReviewThread", p.ResolveActor))
 	}

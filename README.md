@@ -127,7 +127,7 @@ front door on the same engine, not a replacement.
 | `max_usd` | `5` | per-PR spend ceiling (priced models). |
 | `max_tokens_total` | `8000000` | always-works ceiling for unknown-priced models. |
 | `price_per_mtok_in`/`_out` | `0` | teach the ledger a custom model's price. |
-| `resolve_token` | — | optional PAT (pull-requests: write) used **only** to resolve stale review threads across rounds. The default `GITHUB_TOKEN` can't (`Resource not accessible by integration`); without this, fixed findings' threads stay open (dedup still works). |
+| `resolve_token` | — | optional token used **only** to resolve stale review threads across rounds. Needs **both `pull-requests: write` and `contents: read+write`** — a fine-grained PAT with both, a classic `repo`-scope PAT, or a GitHub App token. The default `GITHUB_TOKEN` can't (`Resource not accessible by integration`), and `pull-requests: write` alone is rejected too. Without a capable token, fixed findings' threads stay open (dedup still works). |
 
 \* No default for `openai-compat` — name your gateway's model.
 
